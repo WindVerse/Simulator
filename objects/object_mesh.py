@@ -419,6 +419,46 @@ class ObjectMesh:
         """
         world_verts = self.get_world_vertices()
         return world_verts.mean(axis=0)
+
+    def get_pole_center(self) -> np.ndarray:
+        """
+        Compute and expose the pole center coordinates.
+        For flags, compute pole center from the flag's pole-attachment side (x-min side).
+        For other objects, return the full mesh center.
+        
+        Returns:
+            Pole center position (3,)
+        """
+        world_verts = self.get_world_vertices()
+        if len(world_verts) == 0:
+            return self.position.copy()
+            
+        if self.name.lower() == 'flag':
+            # Extract x-min side (pole attachment side)
+            min_x = world_verts[:, 0].min()
+            # Tolerance for finding vertices on the left edge
+            mask = np.abs(world_verts[:, 0] - min_x) < 0.1
+            left_edge = world_verts[mask]
+            
+            if len(left_edge) > 0:
+                return left_edge.mean(axis=0)
+                
+        # Default behavior: use the object's centroid
+        return self.get_center()
+
+    def get_info_payload(self) -> dict:
+        """
+        Return structured payload with object parameters (for ML parsing).
+        Includes object_type, object_position, and pole_center.
+        """
+        pole_center = self.get_pole_center()
+        
+        # Format as easily serializable tuples
+        return {
+            "object_type": self.name,
+            "object_position": tuple(float(v) for v in self.position),
+            "pole_center": tuple(float(v) for v in pole_center)
+        }
     
     def get_vertex_count(self) -> int:
         """Return the number of vertices."""

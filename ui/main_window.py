@@ -449,7 +449,18 @@ class MainWindow(QMainWindow):
     
     def _add_object(self, object_type: str, x: float, y: float, z: float):
         """Add an object to the scene."""
-        self.scene.add_object(object_type, (x, y, z))
+        mesh = self.scene.add_object(object_type, (x, y, z))
+        
+        # Get structural payload with pole center for ML parsing
+        payload = mesh.get_info_payload()
+        
+        # Log to console clearly
+        print(f"{payload['object_type']}, {payload['object_position']}, {payload['pole_center']}")
+        
+        # Make available to simulation/ML pipeline safely
+        if hasattr(self.sim_controller, 'register_object_payload'):
+            self.sim_controller.register_object_payload(payload)
+            
         self.object_library.update_object_count(len(self.scene.objects))
         self.status_label.setText(f"Added {object_type} at ({x:.1f}, {y:.1f}, {z:.1f})")
         self.gl_widget.update()

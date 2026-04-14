@@ -61,6 +61,9 @@ class SimulationController(QObject):
         self.physics_model = SimplifiedPhysicsModel()
         self.use_ml_model = True
         
+        # ML Object tracking
+        self.object_payloads = []
+        
         # Timing
         self.target_fps = target_fps
         self._dt = 1.0 / target_fps
@@ -83,7 +86,16 @@ class SimulationController(QObject):
         
         # Callbacks
         self._update_callbacks: List[Callable] = []
-    
+
+    def register_object_payload(self, payload: dict):
+        """
+        Record dropped object information for the ML pipeline.
+        This provides the model with object-specific geometry facts like pole_center.
+        """
+        self.object_payloads.append(payload)
+        if hasattr(self.deformation_model, 'register_object_payload'):
+            self.deformation_model.register_object_payload(payload)
+
     def start(self):
         """Start the simulation."""
         if self._is_running:

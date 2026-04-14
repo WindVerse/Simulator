@@ -176,6 +176,9 @@ class DeformationModel:
             num_layers=num_layers
         ).to(self.device)
         
+        # Track object payloads for ML inference context
+        self.object_payloads = []
+
         # Load pretrained weights if provided
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
@@ -183,7 +186,11 @@ class DeformationModel:
             # Initialize with physics-inspired weights for demonstration
             self._init_physics_inspired()
             self.is_loaded = True
-    
+
+    def register_object_payload(self, payload: dict):
+        """Register object payload (e.g. pole center) for ML parsing."""
+        self.object_payloads.append(payload)
+
     def _init_physics_inspired(self):
         """
         Initialize model with physics-inspired behavior.
