@@ -68,6 +68,8 @@ class SimulationController(QObject):
         self.target_fps = target_fps
         self._dt = 1.0 / target_fps
         self._last_update_time = 0.0
+        self._wind_step_interval = 0.1
+        self._wind_time_accumulator = 0.0
         
         # Simulation state
         self._is_running = False
@@ -104,6 +106,7 @@ class SimulationController(QObject):
         self._is_running = True
         self._is_paused = False
         self._last_update_time = time.time()
+        self._wind_time_accumulator = 0.0
         self._timer.start(int(1000 / self.target_fps))
         
         # Reset physics velocities for all objects
@@ -129,6 +132,7 @@ class SimulationController(QObject):
         if self._is_running and self._is_paused:
             self._is_paused = False
             self._last_update_time = time.time()
+            self._wind_time_accumulator = 0.0
             self._timer.start(int(1000 / self.target_fps))
     
     def toggle_pause(self):
@@ -151,6 +155,7 @@ class SimulationController(QObject):
         # Reset counters
         self._frame_count = 0
         self._simulation_time = 0.0
+        self._wind_time_accumulator = 0.0
         
         self.simulation_updated.emit()
     
@@ -164,7 +169,11 @@ class SimulationController(QObject):
         self._last_update_time = current_time
         
         # Update wind field time
-        self.scene.wind_field.advance_time()
+        self._wind_time_accumulator += dt
+        if self._wind_time_accumulator >= self._wind_step_interval:
+            steps = int(self._wind_time_accumulator // self._wind_step_interval)
+            self.scene.wind_field.advance_time(steps)
+            self._wind_time_accumulator -= steps * self._wind_step_interval
         
         # Update each object
         for obj in self.scene.objects:

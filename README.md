@@ -139,8 +139,8 @@ If you prefer to use your own Python installation:
 ### Wind Field
 
 Wind data is stored as a 5D numpy array:
-- Shape: `(time_steps, grid_x, grid_y, grid_z, 3)`
-- The last dimension contains velocity components `(u, v, w)`
+- Shape: `(component, grid_z, grid_y, grid_x, time_steps)`
+- Component order is `(u, v, w)`
 - Trilinear interpolation for smooth velocity queries
 
 ### Deformation Model
@@ -194,15 +194,32 @@ To load custom wind data:
 import numpy as np
 
 # Create or load your wind data
-# Shape: (time_steps, grid_x, grid_y, grid_z, 3)
-wind_data = np.random.randn(100, 20, 20, 10, 3).astype(np.float32)
+# Shape: (component, grid_z, grid_y, grid_x, time_steps)
+wind_data = np.random.randn(3, 10, 20, 20, 100).astype(np.float32)
 
 # Save to file
-np.savez_compressed("wind_data/custom_wind.npz", wind_data=wind_data)
+np.savez_compressed(
+   "wind_data/custom_wind.npz",
+   wind_data=wind_data,
+   x_coords=np.arange(20),
+   y_coords=np.arange(20),
+   z_coords=np.arange(10),
+   time_coords=np.arange(100)
+)
 
 # Load in application
 wind_field.load_from_file("wind_data/custom_wind.npz")
 ```
+
+## OpenFOAM Wind Data
+
+You can load OpenFOAM `postProcessing/surfaces` output directly from the UI:
+
+1. Open the **File** menu and choose **Load OpenFOAM Wind...**
+2. Select the `postProcessing/surfaces` folder
+3. The loader will extract wind data into the 5D array layout above
+
+Wind time advances based on real wall-clock time, updating every 0.1 seconds.
 
 ## Pre-trained Models
 

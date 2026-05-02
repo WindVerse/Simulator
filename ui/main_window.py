@@ -399,6 +399,10 @@ class MainWindow(QMainWindow):
         load_action.setShortcut(QKeySequence.Open)
         load_action.triggered.connect(self._load_scene)
         file_menu.addAction(load_action)
+
+        load_wind_action = QAction("Load &OpenFOAM Wind...", self)
+        load_wind_action.triggered.connect(self._load_openfoam_wind)
+        file_menu.addAction(load_wind_action)
         
         file_menu.addSeparator()
         
@@ -556,6 +560,35 @@ class MainWindow(QMainWindow):
             self.object_library.update_object_count(len(self.scene.objects))
             self.gl_widget.update()
             self.status_label.setText(f"Scene loaded from {filepath}")
+
+    def _load_openfoam_wind(self):
+        """Load OpenFOAM wind data from a folder."""
+        base_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select OpenFOAM surfaces folder",
+            ""
+        )
+
+        if not base_dir:
+            return
+
+        if self.sim_controller.is_running:
+            self.sim_controller.stop()
+            self.play_action.setChecked(False)
+            self.control_panel.play_btn.setChecked(False)
+
+        self.status_label.setText("Loading OpenFOAM wind data...")
+        self.status_bar.repaint()
+
+        try:
+            self.wind_field.load_from_openfoam_folder(base_dir)
+        except Exception as exc:
+            QMessageBox.critical(self, "OpenFOAM Load Failed", str(exc))
+            self.status_label.setText("Failed to load OpenFOAM wind data")
+            return
+
+        self.status_label.setText(f"OpenFOAM wind loaded from {base_dir}")
+        self.gl_widget.update()
     
     def _show_about(self):
         """Show about dialog."""
