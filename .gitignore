@@ -22,3 +22,6 @@ Thumbs.db
 .idea/
 *.swp
 *.sqlite
+
+#sample wind data files
+sample_wind_data/
