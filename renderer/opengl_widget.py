@@ -33,10 +33,12 @@ class OpenGLWidget(QOpenGLWidget):
     Signals:
         object_dropped: Emitted when an object is dropped at a position
         object_selected: Emitted when an object is clicked
+        cursor_world_moved: Emitted with the ground-plane world position under the cursor
     """
     
     object_dropped = pyqtSignal(str, float, float, float)
     object_selected = pyqtSignal(object)
+    cursor_world_moved = pyqtSignal(float, float, float)
     
     def __init__(self, scene: Scene, parent=None):
         """
@@ -112,7 +114,22 @@ class OpenGLWidget(QOpenGLWidget):
         """Render the scene."""
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         
-        # Set up projection matrix
+        self._apply_camera_matrices()
+        
+        # Draw scene elements
+        if self.scene.ground_visible:
+            self._draw_ground()
+        
+        if self.scene.grid_visible:
+            self._draw_grid()
+        
+        if self.scene.wind_vectors_visible:
+            self._draw_wind_vectors()
+        
+        self._draw_objects()
+    
+    def _apply_camera_matrices(self):
+        """Apply the current camera projection and view matrices."""
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(
@@ -130,31 +147,20 @@ class OpenGLWidget(QOpenGLWidget):
             *self.scene.camera.target,
             *self.scene.camera.up
         )
-        
-        # Draw scene elements
-        if self.scene.ground_visible:
-            self._draw_ground()
-        
-        if self.scene.grid_visible:
-            self._draw_grid()
-        
-        if self.scene.wind_vectors_visible:
-            self._draw_wind_vectors()
-        
-        self._draw_objects()
     
     def _draw_ground(self):
         """Draw the ground plane."""
         glDisable(GL_LIGHTING)
         
         half_size = self.scene.grid_size // 2 * self.scene.grid_spacing
+        center_x, center_z = self.scene.grid_center
         
         glColor4f(0.15, 0.15, 0.18, 1.0)
         glBegin(GL_QUADS)
-        glVertex3f(-half_size, -0.01, -half_size)
-        glVertex3f(half_size, -0.01, -half_size)
-        glVertex3f(half_size, -0.01, half_size)
-        glVertex3f(-half_size, -0.01, half_size)
+        glVertex3f(center_x - half_size, -0.01, center_z - half_size)
+        glVertex3f(center_x + half_size, -0.01, center_z - half_size)
+        glVertex3f(center_x + half_size, -0.01, center_z + half_size)
+        glVertex3f(center_x - half_size, -0.01, center_z + half_size)
         glEnd()
         
         glEnable(GL_LIGHTING)
@@ -166,19 +172,24 @@ class OpenGLWidget(QOpenGLWidget):
         
         half_size = self.scene.grid_size // 2
         spacing = self.scene.grid_spacing
+        center_x, center_z = self.scene.grid_center
+        extent = half_size * spacing
         
         glColor4f(*self._grid_color)
         glBegin(GL_LINES)
         
         # Draw grid lines
         for i in range(-half_size, half_size + 1):
+            x = center_x + i * spacing
+            z = center_z + i * spacing
+            
             # X-parallel lines
-            glVertex3f(i * spacing, 0, -half_size * spacing)
-            glVertex3f(i * spacing, 0, half_size * spacing)
+            glVertex3f(x, 0, center_z - extent)
+            glVertex3f(x, 0, center_z + extent)
             
             # Z-parallel lines
-            glVertex3f(-half_size * spacing, 0, i * spacing)
-            glVertex3f(half_size * spacing, 0, i * spacing)
+            glVertex3f(center_x - extent, 0, z)
+            glVertex3f(center_x + extent, 0, z)
         
         glEnd()
         glEnable(GL_LIGHTING)
@@ -286,7 +297,7 @@ class OpenGLWidget(QOpenGLWidget):
         
         if event.button() == Qt.LeftButton and not self._pending_drop_type:
             # Try to select an object
-            world_pos = self._screen_to_world(event.x(), event.y())
+            world_pos = self._screen_to_world_current(event.x(), event.y())
             if world_pos is not None:
                 obj = self.scene.get_object_at_position(world_pos)
                 self.scene.select_object(obj)
@@ -297,7 +308,7 @@ class OpenGLWidget(QOpenGLWidget):
         """Handle mouse release."""
         if self._pending_drop_type and event.button() == Qt.LeftButton:
             # Place object
-            world_pos = self._screen_to_world(event.x(), event.y())
+            world_pos = self._screen_to_world_current(event.x(), event.y())
             if world_pos is not None:
                 snapped_pos = self.scene.snap_to_grid(world_pos)
                 self.object_dropped.emit(
@@ -314,6 +325,8 @@ class OpenGLWidget(QOpenGLWidget):
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """Handle mouse movement."""
+        self._emit_cursor_world_position(event)
+        
         if self._last_mouse_pos is None:
             return
         
@@ -330,6 +343,20 @@ class OpenGLWidget(QOpenGLWidget):
             self.update()
         
         self._last_mouse_pos = event.pos()
+    
+    def _emit_cursor_world_position(self, event: QMouseEvent):
+        """Emit the current ground-plane world position under the cursor."""
+        world_pos = self._screen_to_world_current(event.x(), event.y())
+        
+        if world_pos is None:
+            self.cursor_world_moved.emit(float('nan'), float('nan'), float('nan'))
+            return
+        
+        self.cursor_world_moved.emit(
+            float(world_pos[0]),
+            float(world_pos[1]),
+            float(world_pos[2])
+        )
     
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zoom."""
@@ -379,6 +406,16 @@ class OpenGLWidget(QOpenGLWidget):
         intersection = ray_origin + t * ray_dir
         return intersection.astype(np.float32)
     
+    def _screen_to_world_current(
+        self,
+        screen_x: int,
+        screen_y: int
+    ) -> Optional[np.ndarray]:
+        """Convert screen coordinates using the current GL context and camera."""
+        self.makeCurrent()
+        self._apply_camera_matrices()
+        return self._screen_to_world(screen_x, screen_y)
+    
     def set_pending_drop(self, object_type: str):
         """
         Set the object type for next drop.
@@ -412,8 +449,7 @@ class OpenGLWidget(QOpenGLWidget):
             pos = event.pos()
             
             # Convert to world coordinates
-            self.makeCurrent()
-            world_pos = self._screen_to_world(pos.x(), pos.y())
+            world_pos = self._screen_to_world_current(pos.x(), pos.y())
             
             if world_pos is not None:
                 snapped_pos = self.scene.snap_to_grid(world_pos)

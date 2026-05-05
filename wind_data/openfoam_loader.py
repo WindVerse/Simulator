@@ -2,7 +2,9 @@
 OpenFOAM wind data loader.
 Extracts wind data from postProcessing/surfaces output into a 5D array.
 
-Data layout: (component, z, y, x, time)
+Data layout: (component, z, y, x, time). The simulator uses Y as the up axis,
+so OpenFOAM's z-up coordinates are mapped to world Y, and OpenFOAM Y is mapped
+to world Z.
 """
 
 from collections import deque
@@ -180,4 +182,20 @@ def extract_openfoam_wind(base_dir: str) -> Tuple[np.ndarray, np.ndarray, np.nda
             wind_data[2, z_idx, y_idx, x_idx, time_idx] = data[:, 5]
 
     wind_data = _fill_missing_nearest(wind_data)
-    return wind_data, x_coords, y_coords, z_coords, time_coords
+    
+    # Raw OpenFOAM axes are x, y, z with z-up. The simulator world is x, y-up, z.
+    world_wind_data = np.empty(
+        (3, len(y_coords), len(z_coords), len(x_coords), len(time_coords)),
+        dtype=np.float32
+    )
+    world_wind_data[0] = np.transpose(wind_data[0], (1, 0, 2, 3))  # U_x -> world X
+    world_wind_data[1] = np.transpose(wind_data[2], (1, 0, 2, 3))  # U_z -> world Y
+    world_wind_data[2] = np.transpose(wind_data[1], (1, 0, 2, 3))  # U_y -> world Z
+    
+    return (
+        world_wind_data,
+        x_coords.astype(np.float32),
+        z_coords.astype(np.float32),
+        y_coords.astype(np.float32),
+        time_coords
+    )

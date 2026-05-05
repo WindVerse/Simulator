@@ -175,6 +175,7 @@ class Scene:
         # Grid settings
         self.grid_size = 20
         self.grid_spacing = 1.0
+        self.grid_center = (0.0, 0.0)
         
         # Selection
         self.selected_object: Optional[ObjectMesh] = None
@@ -288,7 +289,16 @@ class Scene:
         Returns:
             Snapped position
         """
-        snapped = np.round(position / self.grid_spacing) * self.grid_spacing
+        center_x, center_z = self.grid_center
+        snapped = position.copy()
+        snapped[0] = (
+            center_x +
+            np.round((position[0] - center_x) / self.grid_spacing) * self.grid_spacing
+        )
+        snapped[2] = (
+            center_z +
+            np.round((position[2] - center_z) / self.grid_spacing) * self.grid_spacing
+        )
         snapped[1] = 0  # Keep y at ground level
         return snapped
     
@@ -299,8 +309,9 @@ class Scene:
         Returns:
             Array of grid point positions
         """
-        x = np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
-        z = np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
+        center_x, center_z = self.grid_center
+        x = center_x + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
+        z = center_z + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
         
         X, Z = np.meshgrid(x, z)
         Y = np.zeros_like(X)
@@ -315,9 +326,10 @@ class Scene:
         Returns:
             Tuple of (min_corner, max_corner)
         """
+        center_x, center_z = self.grid_center
         half_size = self.grid_size // 2 * self.grid_spacing
-        min_corner = np.array([-half_size, 0, -half_size])
-        max_corner = np.array([half_size, 10, half_size])
+        min_corner = np.array([center_x - half_size, 0, center_z - half_size])
+        max_corner = np.array([center_x + half_size, 10, center_z + half_size])
         
         # Include objects
         for obj in self.objects:

@@ -15,6 +15,7 @@ from PyQt5.QtGui import QIcon, QKeySequence
 import sys
 import os
 import json
+import math
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -380,6 +381,11 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.status_bar.addWidget(self.status_label, stretch=1)
         
+        self.coord_label = QLabel("X: -- Y: -- Z: --")
+        self.coord_label.setMinimumWidth(220)
+        self.coord_label.setStyleSheet("font-family: monospace; color: #aaa;")
+        self.status_bar.addPermanentWidget(self.coord_label)
+        
         self.fps_label = QLabel("FPS: --")
         self.status_bar.addPermanentWidget(self.fps_label)
     
@@ -438,6 +444,9 @@ class MainWindow(QMainWindow):
         # Object selection
         self.gl_widget.object_selected.connect(self._on_object_selected)
         
+        # Viewport hover coordinates
+        self.gl_widget.cursor_world_moved.connect(self._on_cursor_world_moved)
+        
         # Simulation updates
         self.sim_controller.simulation_updated.connect(self._on_simulation_update)
         
@@ -475,6 +484,14 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Selected: {obj.name}")
         else:
             self.status_label.setText("Ready")
+    
+    def _on_cursor_world_moved(self, x: float, y: float, z: float):
+        """Update the status bar with the cursor's world coordinates."""
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            self.coord_label.setText("X: -- Y: -- Z: --")
+            return
+        
+        self.coord_label.setText(f"X: {x:.1f} Y: {y:.1f} Z: {z:.1f}")
     
     def _on_simulation_update(self):
         """Handle simulation update."""
@@ -587,8 +604,47 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Failed to load OpenFOAM wind data")
             return
 
+        self._fit_grid_to_wind_field()
         self.status_label.setText(f"OpenFOAM wind loaded from {base_dir}")
         self.gl_widget.update()
+    
+    def _fit_grid_to_wind_field(self):
+        """Resize and center the ground grid around the loaded wind field."""
+        min_corner, max_corner = self.wind_field.get_bounds()
+        min_x, max_x = float(min_corner[0]), float(max_corner[0])
+        min_z, max_z = float(min_corner[2]), float(max_corner[2])
+        
+        spacing = self._infer_horizontal_grid_spacing()
+        center_x = (min_x + max_x) / 2.0
+        center_z = (min_z + max_z) / 2.0
+        half_extent = max((max_x - min_x) / 2.0, (max_z - min_z) / 2.0, spacing)
+        half_steps = max(1, int(math.ceil(half_extent / spacing)))
+        
+        self.scene.grid_center = (center_x, center_z)
+        self.scene.grid_spacing = spacing
+        self.scene.grid_size = half_steps * 2
+    
+    def _infer_horizontal_grid_spacing(self) -> float:
+        """Infer a display grid spacing from loaded wind X/Z coordinates."""
+        spacing_candidates = []
+        
+        for coords in (self.wind_field.x_coords, self.wind_field.z_coords):
+            unique_coords = sorted({float(coord) for coord in coords})
+            diffs = [
+                b - a
+                for a, b in zip(unique_coords, unique_coords[1:])
+                if b - a > 1e-6
+            ]
+            
+            if diffs:
+                diffs.sort()
+                index = min(len(diffs) - 1, int(round((len(diffs) - 1) * 0.75)))
+                spacing_candidates.append(diffs[index])
+        
+        if not spacing_candidates:
+            return max(float(self.scene.grid_spacing), 1.0)
+        
+        return max(min(spacing_candidates), 1e-3)
     
     def _show_about(self):
         """Show about dialog."""
