@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Portable Python Environment
+# (PyTorch and other packages make this folder gigabytes in size, which will break Git)
+python/
+
+# Environments and OS files
+.DS_Store
+Thumbs.db
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.sqlite
+
+#sample wind data files
+sample_wind_data/
