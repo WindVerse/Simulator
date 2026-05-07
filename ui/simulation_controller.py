@@ -6,7 +6,7 @@ Manages the simulation loop for wind deformation.
 import numpy as np
 from typing import Optional, Callable, List
 import time
-
+from models import config as cfg
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 import sys
@@ -201,6 +201,11 @@ class SimulationController(QObject):
             obj: The object to update
             dt: Time step
         """
+
+        # Get rest lengths of the edges
+        rest_lengths = obj.rest_lengths
+        print(rest_lengths)
+
         # Get wind at object position
         wind_velocity = self.scene.get_wind_at_object(obj)
         
@@ -210,10 +215,12 @@ class SimulationController(QObject):
         
         if self.use_ml_model and self.deformation_model.is_loaded:
             # Use ML model for prediction
+
             displacement = self.deformation_model.predict(
                 vertices,
                 wind_velocity,
-                previous_vertices
+                previous_vertices,
+                rest_lengths
             )
         else:
             # Use physics-based fallback

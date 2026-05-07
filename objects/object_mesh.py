@@ -31,7 +31,8 @@ class ObjectMesh:
         self,
         name: str,
         obj_path: Optional[str] = None,
-        position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        rest_lengths = None
     ):
         """
         Initialize the mesh object.

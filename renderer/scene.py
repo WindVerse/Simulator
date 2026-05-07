@@ -7,8 +7,10 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 import sys
 import os
-
+import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import config as cfg
+
 
 from objects.object_mesh import ObjectMesh
 from wind_data.wind_field import WindField
@@ -176,6 +178,8 @@ class Scene:
         self.grid_size = 20
         self.grid_spacing = 1.0
         self.grid_center = (0.0, 0.0)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Selection
         self.selected_object: Optional[ObjectMesh] = None
@@ -183,6 +187,12 @@ class Scene:
         # Object ID counter
         self._next_id = 0
         self._object_ids: Dict[int, ObjectMesh] = {}
+
+    def calculate_edge_lengths(self, pos, edge_index):
+        """Computes the length of every edge in the mesh."""
+        row, col = edge_index
+        vec = pos[row] - pos[col]
+        return torch.norm(vec, dim=1)
     
     def add_object(
         self,
@@ -201,10 +211,19 @@ class Scene:
         Returns:
             The created ObjectMesh
         """
+            # Create mesh first
         mesh = ObjectMesh(object_type, obj_path, position)
-        self.objects.append(mesh)
         
-        # Assign ID
+        # Load edge topology
+        edge_index = torch.from_numpy(np.load(cfg.TOPOLOGY_PATH)).long().to(self.device)
+        
+        # Get mesh vertices as tensor
+        vertices_tensor = torch.from_numpy(mesh.vertices.astype(np.float32)).to(self.device)
+        
+        # Calculate and store rest_lengths in the mesh
+        mesh.rest_lengths = self.calculate_edge_lengths(vertices_tensor, edge_index)
+        
+        self.objects.append(mesh)
         self._object_ids[self._next_id] = mesh
         self._next_id += 1
         
