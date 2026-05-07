@@ -34,9 +34,13 @@ class Camera:
         self.azimuth = 45.0  # Horizontal angle in degrees
         self.elevation = 30.0  # Vertical angle in degrees
         
+        # Zoom limits for ±50m grid viewing
+        self.zoom_min = 0.2  # Allow very close zoom (0.2m minimum)
+        self.zoom_max = 200.0  # Allow very far zoom (200m maximum)
+        
         # Projection parameters
         self.fov = 60.0
-        self.near = 0.1
+        self.near = 0.01  # Reduced from 0.1 for closer near plane
         self.far = 1000.0
         self.aspect = 1.0
         
@@ -67,12 +71,17 @@ class Camera:
     
     def zoom(self, delta: float):
         """
-        Zoom in or out.
+        Zoom in or out with smooth exponential scaling.
         
         Args:
             delta: Zoom amount (positive = zoom in)
         """
-        self.distance = max(1.0, self.distance - delta)
+        # Use exponential scaling for smooth zoom over large ranges
+        zoom_speed = 0.1  # Sensitivity factor
+        new_distance = self.distance * (1.0 - zoom_speed * delta)
+        
+        # Clamp to zoom limits
+        self.distance = np.clip(new_distance, self.zoom_min, self.zoom_max)
         self._update_position()
     
     def pan(self, delta_x: float, delta_y: float):
@@ -175,7 +184,7 @@ class Scene:
         self.ground_visible = True
         
         # Grid settings
-        self.grid_size = 20
+        self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = 1.0
         self.grid_center = (0.0, 0.0)
 
@@ -188,8 +197,77 @@ class Scene:
         self._next_id = 0
         self._object_ids: Dict[int, ObjectMesh] = {}
 
+    def _get_default_obj_path(self, object_type: str) -> Optional[str]:
+        """Return the bundled OBJ path for a known object type, if present."""
+        candidate = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "objects",
+            f"{object_type.lower()}.obj"
+        )
+        return candidate if os.path.exists(candidate) else None
+
+    def _edge_index_from_faces(self, faces: np.ndarray, num_vertices: int) -> torch.Tensor:
+        """Build a directed edge index from mesh faces."""
+        if faces is None or len(faces) == 0:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        faces = np.asarray(faces, dtype=np.int64)
+        if faces.ndim != 2 or faces.shape[1] < 3:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        min_index = int(faces.min())
+        max_index = int(faces.max())
+        if min_index < 0 or max_index >= num_vertices:
+            raise ValueError(
+                f"Mesh face index out of bounds: valid range is [0, {num_vertices - 1}], "
+                f"but faces contain [{min_index}, {max_index}]"
+            )
+
+        edges = set()
+        for face in faces:
+            face_vertices = [int(vertex) for vertex in face]
+            for start, end in zip(face_vertices, face_vertices[1:] + face_vertices[:1]):
+                if start == end:
+                    continue
+                edges.add((start, end))
+                edges.add((end, start))
+
+        if not edges:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        return torch.tensor(sorted(edges), dtype=torch.long).t().contiguous()
+
+    def _load_edge_index_for_mesh(self, mesh: ObjectMesh) -> torch.Tensor:
+        """Load the trained topology when it matches; otherwise derive topology from faces."""
+        num_vertices = mesh.get_vertex_count()
+
+        if num_vertices == cfg.NUM_VERTICES and os.path.exists(cfg.TOPOLOGY_PATH):
+            topology = np.load(cfg.TOPOLOGY_PATH)
+            if topology.ndim == 2 and topology.shape[0] == 2 and topology.size > 0:
+                min_index = int(topology.min())
+                max_index = int(topology.max())
+                if min_index >= 0 and max_index < num_vertices:
+                    return torch.from_numpy(topology).long()
+
+        return self._edge_index_from_faces(mesh.faces, num_vertices)
+
     def calculate_edge_lengths(self, pos, edge_index):
         """Computes the length of every edge in the mesh."""
+        if edge_index.numel() == 0:
+            return torch.empty((0,), device=pos.device, dtype=pos.dtype)
+
+        if edge_index.dim() != 2 or edge_index.shape[0] != 2:
+            raise ValueError(f"edge_index must have shape [2, E], got {tuple(edge_index.shape)}")
+
+        num_vertices = pos.shape[0]
+        min_index = int(edge_index.min().item())
+        max_index = int(edge_index.max().item())
+        if min_index < 0 or max_index >= num_vertices:
+            raise ValueError(
+                f"edge_index out of bounds for mesh with {num_vertices} vertices: "
+                f"found indices [{min_index}, {max_index}]"
+            )
+
         row, col = edge_index
         vec = pos[row] - pos[col]
         return torch.norm(vec, dim=1)
@@ -211,11 +289,15 @@ class Scene:
         Returns:
             The created ObjectMesh
         """
-            # Create mesh first
+        # Create mesh first
+        if obj_path is None:
+            obj_path = self._get_default_obj_path(object_type)
+
         mesh = ObjectMesh(object_type, obj_path, position)
         
-        # Load edge topology
-        edge_index = torch.from_numpy(np.load(cfg.TOPOLOGY_PATH)).long().to(self.device)
+        # Load a topology that is valid for this mesh.
+        edge_index = self._load_edge_index_for_mesh(mesh).to(self.device)
+        mesh.edge_index = edge_index
         
         # Get mesh vertices as tensor
         vertices_tensor = torch.from_numpy(mesh.vertices.astype(np.float32)).to(self.device)
@@ -284,6 +366,17 @@ class Scene:
             mesh: Object to select (None to deselect)
         """
         self.selected_object = mesh
+    
+    def move_object(self, mesh: ObjectMesh, new_position: np.ndarray) -> None:
+        """
+        Move an object to a new position.
+        
+        Args:
+            mesh: Object to move
+            new_position: New world position
+        """
+        if mesh in self.objects:
+            mesh.position = np.array(new_position, dtype=np.float32)
     
     def get_wind_at_object(self, mesh: ObjectMesh) -> np.ndarray:
         """
