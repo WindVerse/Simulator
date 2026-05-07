@@ -57,6 +57,14 @@ class OpenGLWidget(QOpenGLWidget):
         self._mouse_button: Optional[int] = None
         self._is_dragging = False
         
+        # Object dragging state
+        self._dragged_object: Optional[ObjectMesh] = None
+        self._drag_start_pos: Optional[np.ndarray] = None
+        self._drag_offset: Optional[np.ndarray] = None
+        
+        # Grid hover state
+        self._hovered_grid_cell: Optional[Tuple[float, float]] = None
+        
         # Drop state
         self._pending_drop_type: Optional[str] = None
         
@@ -166,7 +174,7 @@ class OpenGLWidget(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def _draw_grid(self):
-        """Draw the ground grid."""
+        """Draw the ground grid with enhanced visuals."""
         glDisable(GL_LIGHTING)
         glLineWidth(1.0)
         
@@ -192,7 +200,80 @@ class OpenGLWidget(QOpenGLWidget):
             glVertex3f(center_x + extent, 0, z)
         
         glEnd()
+        
+        # Draw highlighted grid cell under cursor
+        self._draw_hovered_grid_cell()
+        
+        # Draw coordinate labels
+        self._draw_grid_labels()
+        
         glEnable(GL_LIGHTING)
+    
+    def _draw_hovered_grid_cell(self):
+        """Draw a highlighted square for the grid cell under the cursor."""
+        if self._hovered_grid_cell is None:
+            return
+        
+        x, z = self._hovered_grid_cell
+        half_spacing = self.scene.grid_spacing / 2.0
+        
+        # Draw semi-transparent highlight quad
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        
+        # Light blue highlight with transparency
+        glColor4f(0.2, 0.6, 1.0, 0.2)
+        glBegin(GL_QUADS)
+        glVertex3f(x - half_spacing, 0.001, z - half_spacing)
+        glVertex3f(x + half_spacing, 0.001, z - half_spacing)
+        glVertex3f(x + half_spacing, 0.001, z + half_spacing)
+        glVertex3f(x - half_spacing, 0.001, z + half_spacing)
+        glEnd()
+        
+        # Draw outline
+        glLineWidth(2.0)
+        glColor4f(0.2, 0.8, 1.0, 0.8)
+        glBegin(GL_LINE_LOOP)
+        glVertex3f(x - half_spacing, 0.002, z - half_spacing)
+        glVertex3f(x + half_spacing, 0.002, z - half_spacing)
+        glVertex3f(x + half_spacing, 0.002, z + half_spacing)
+        glVertex3f(x - half_spacing, 0.002, z + half_spacing)
+        glEnd()
+        
+        glEnable(GL_DEPTH_TEST)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+    
+    def _draw_grid_labels(self):
+        """Draw X and Z coordinate labels on the grid."""
+        half_size = self.scene.grid_size // 2
+        spacing = self.scene.grid_spacing
+        center_x, center_z = self.scene.grid_center
+        extent = half_size * spacing
+        
+        glDisable(GL_LIGHTING)
+        glLineWidth(1.0)
+        glColor4f(0.5, 0.5, 0.5, 0.8)
+        
+        # Draw axis labels every 10 meters
+        label_interval = 10
+        for i in range(-half_size, half_size + 1, label_interval // int(spacing)):
+            x = center_x + i * spacing
+            z = center_z + i * spacing
+            
+            # X-axis marker
+            if abs(i * spacing) < extent + 1:
+                glBegin(GL_LINES)
+                glVertex3f(x, 0, center_z - extent - 1)
+                glVertex3f(x, 0, center_z - extent - 0.5)
+                glEnd()
+            
+            # Z-axis marker
+            if abs(i * spacing) < extent + 1:
+                glBegin(GL_LINES)
+                glVertex3f(center_x - extent - 1, 0, z)
+                glVertex3f(center_x - extent - 0.5, 0, z)
+                glEnd()
     
     def _draw_wind_vectors(self):
         """Draw wind velocity vectors."""
@@ -243,7 +324,7 @@ class OpenGLWidget(QOpenGLWidget):
     
     def _draw_mesh(self, mesh: ObjectMesh, selected: bool = False):
         """
-        Draw a single mesh object.
+        Draw a single mesh object with enhanced selection effects.
         
         Args:
             mesh: The mesh to draw
@@ -253,11 +334,20 @@ class OpenGLWidget(QOpenGLWidget):
         
         # Apply object transform
         glTranslatef(*mesh.position)
+        if mesh.name.lower() == "flag":
+            glRotatef(-90.0, 1.0, 0.0, 0.0)
         glScalef(mesh.scale, mesh.scale, mesh.scale)
         
-        # Set color
+        # Set color with glow effect for selected objects
         if selected:
-            glColor4f(*self._selection_color)
+            # Brighten color for selection glow
+            color = (
+                min(1.0, self._selection_color[0] + 0.3),
+                min(1.0, self._selection_color[1] + 0.3),
+                min(1.0, self._selection_color[2] + 0.3),
+                self._selection_color[3]
+            )
+            glColor4f(*color)
         else:
             glColor4f(*mesh.color)
         
@@ -272,13 +362,14 @@ class OpenGLWidget(QOpenGLWidget):
         
         glEnd()
         
-        # Draw selection outline
+        # Draw selection effects
         if selected:
             glDisable(GL_LIGHTING)
-            glLineWidth(2.0)
+            glLineWidth(3.0)
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             glColor4f(1.0, 1.0, 0.0, 1.0)
             
+            # Draw outline with thicker lines
             glBegin(GL_TRIANGLES)
             for face in mesh.faces:
                 for vertex_idx in face:
@@ -286,9 +377,71 @@ class OpenGLWidget(QOpenGLWidget):
             glEnd()
             
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            
+            # Draw bounding box
+            self._draw_bounding_box(mesh)
+            
             glEnable(GL_LIGHTING)
         
         glPopMatrix()
+    
+    def _draw_bounding_box(self, mesh: ObjectMesh):
+        """Draw a bounding box around a mesh."""
+        vertices = mesh.current_vertices
+        
+        if len(vertices) == 0:
+            return
+        
+        # Find bounding box
+        min_point = np.min(vertices, axis=0)
+        max_point = np.max(vertices, axis=0)
+        
+        glLineWidth(2.0)
+        glColor4f(0.2, 1.0, 1.0, 0.8)
+        
+        # Draw box edges
+        glBegin(GL_LINES)
+        
+        # Bottom face
+        glVertex3fv(min_point)
+        glVertex3fv([max_point[0], min_point[1], min_point[2]])
+        
+        glVertex3fv([max_point[0], min_point[1], min_point[2]])
+        glVertex3fv([max_point[0], min_point[1], max_point[2]])
+        
+        glVertex3fv([max_point[0], min_point[1], max_point[2]])
+        glVertex3fv([min_point[0], min_point[1], max_point[2]])
+        
+        glVertex3fv([min_point[0], min_point[1], max_point[2]])
+        glVertex3fv(min_point)
+        
+        # Top face
+        glVertex3fv([min_point[0], max_point[1], min_point[2]])
+        glVertex3fv([max_point[0], max_point[1], min_point[2]])
+        
+        glVertex3fv([max_point[0], max_point[1], min_point[2]])
+        glVertex3fv(max_point)
+        
+        glVertex3fv(max_point)
+        glVertex3fv([min_point[0], max_point[1], max_point[2]])
+        
+        glVertex3fv([min_point[0], max_point[1], max_point[2]])
+        glVertex3fv([min_point[0], max_point[1], min_point[2]])
+        
+        # Vertical edges
+        glVertex3fv(min_point)
+        glVertex3fv([min_point[0], max_point[1], min_point[2]])
+        
+        glVertex3fv([max_point[0], min_point[1], min_point[2]])
+        glVertex3fv([max_point[0], max_point[1], min_point[2]])
+        
+        glVertex3fv([max_point[0], min_point[1], max_point[2]])
+        glVertex3fv(max_point)
+        
+        glVertex3fv([min_point[0], min_point[1], max_point[2]])
+        glVertex3fv([min_point[0], max_point[1], max_point[2]])
+        
+        glEnd()
     
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press."""
@@ -296,18 +449,30 @@ class OpenGLWidget(QOpenGLWidget):
         self._mouse_button = event.button()
         
         if event.button() == Qt.LeftButton and not self._pending_drop_type:
-            # Try to select an object
+            # Try to select an object or start dragging it
             world_pos = self._screen_to_world_current(event.x(), event.y())
             if world_pos is not None:
                 obj = self.scene.get_object_at_position(world_pos)
-                self.scene.select_object(obj)
-                self.object_selected.emit(obj)
+                
+                if obj is not None:
+                    # Start dragging object
+                    self._dragged_object = obj
+                    self._drag_start_pos = obj.position.copy()
+                    self._drag_offset = obj.position - world_pos
+                    self.scene.select_object(obj)
+                    self.object_selected.emit(obj)
+                    self._is_dragging = True
+                else:
+                    # No object, just select/deselect
+                    self.scene.select_object(None)
+                    self.object_selected.emit(None)
+                
                 self.update()
     
     def mouseReleaseEvent(self, event: QMouseEvent):
         """Handle mouse release."""
         if self._pending_drop_type and event.button() == Qt.LeftButton:
-            # Place object
+            # Place object from library
             world_pos = self._screen_to_world_current(event.x(), event.y())
             if world_pos is not None:
                 snapped_pos = self.scene.snap_to_grid(world_pos)
@@ -319,6 +484,22 @@ class OpenGLWidget(QOpenGLWidget):
                 )
             self._pending_drop_type = None
             self.setCursor(Qt.ArrowCursor)
+        
+        # Handle object drag completion
+        if self._dragged_object and event.button() == Qt.LeftButton:
+            # Snap dragged object to grid
+            snapped_pos = self.scene.snap_to_grid(self._dragged_object.position)
+            self.scene.move_object(self._dragged_object, snapped_pos)
+            
+            # Emit signal that object was moved
+            payload = self._dragged_object.get_info_payload()
+            print(f"Moved {payload['object_type']} to ({snapped_pos[0]:.1f}, {snapped_pos[1]:.1f}, {snapped_pos[2]:.1f})")
+            
+            self._dragged_object = None
+            self._drag_start_pos = None
+            self._drag_offset = None
+            self._is_dragging = False
+            self.update()
         
         self._last_mouse_pos = None
         self._mouse_button = None
@@ -333,7 +514,16 @@ class OpenGLWidget(QOpenGLWidget):
         dx = event.x() - self._last_mouse_pos.x()
         dy = event.y() - self._last_mouse_pos.y()
         
-        if self._mouse_button == Qt.RightButton:
+        # Handle object dragging
+        if self._dragged_object and self._mouse_button == Qt.LeftButton:
+            world_pos = self._screen_to_world_current(event.x(), event.y())
+            if world_pos is not None:
+                # Move object with offset
+                new_pos = world_pos + self._drag_offset
+                new_pos[1] = 0  # Keep at ground level
+                self.scene.move_object(self._dragged_object, new_pos)
+                self.update()
+        elif self._mouse_button == Qt.RightButton:
             # Orbit camera
             self.scene.camera.orbit(dx * 0.5, -dy * 0.5)
             self.update()
@@ -341,16 +531,25 @@ class OpenGLWidget(QOpenGLWidget):
             # Pan camera
             self.scene.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
+        elif self._mouse_button == Qt.LeftButton and not self._dragged_object:
+            # Pan camera on left button click on empty grid
+            self.scene.camera.pan(-dx * 0.02, dy * 0.02)
+            self.update()
         
         self._last_mouse_pos = event.pos()
     
     def _emit_cursor_world_position(self, event: QMouseEvent):
-        """Emit the current ground-plane world position under the cursor."""
+        """Emit the current ground-plane world position under the cursor and track hovered grid cell."""
         world_pos = self._screen_to_world_current(event.x(), event.y())
         
         if world_pos is None:
             self.cursor_world_moved.emit(float('nan'), float('nan'), float('nan'))
+            self._hovered_grid_cell = None
             return
+        
+        # Track hovered grid cell for visualization
+        snapped = self.scene.snap_to_grid(world_pos)
+        self._hovered_grid_cell = (float(snapped[0]), float(snapped[2]))
         
         self.cursor_world_moved.emit(
             float(world_pos[0]),
