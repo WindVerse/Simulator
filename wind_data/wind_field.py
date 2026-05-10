@@ -2,6 +2,10 @@
 WindField Class
 Handles 5D wind data (component, z, y, x, time).
 Provides wind velocity vectors at any point in the field.
+
+Coordinate convention: world frame is right-handed, +Z up. The horizontal
+plane is X/Y, with Z=0 as the ground. Velocity components are (u_x, u_y, u_z)
+in the same world frame; u_z is vertical wind.
 """
 
 import numpy as np
@@ -16,7 +20,8 @@ class WindField:
 
     The wind data is stored as a 5D numpy array with shape:
     (component, grid_z, grid_y, grid_x, time_steps)
-    where the component axis is (u, v, w).
+    where the component axis is (u_x, u_y, u_z) in the world frame
+    (Z is vertical / up).
 
     Attributes:
         data: The wind velocity data array

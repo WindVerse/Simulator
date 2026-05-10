@@ -4,11 +4,12 @@ An interactive 3D wind visualization tool with ML-based mesh deformation.
 
 ## Features
 
+- **OpenFOAM Sample Wind Auto-Loaded**: Bundled `wind_data/sample_wind_data` is loaded in the background on startup — no manual action required
 - **Drag-and-Drop Object Placement**: Place trees, flags, cloth, and poles into the 3D scene
 - **Real-Time Wind Visualization**: View animated wind velocity vectors in the 3D space
 - **ML-Based Deformation**: PyTorch neural network predicts mesh vertex displacements
 - **GPU Acceleration**: Automatic GPU usage when available
-- **Interactive Camera**: Orbit, pan, and zoom controls
+- **Interactive Camera**: Orbit, pan, and zoom controls (Z-up world)
 - **Simulation Controls**: Play, pause, and reset simulation
 
 ## Project Structure
@@ -39,7 +40,9 @@ project/
 │   └── pole.obj           # Sample pole mesh
 ├── wind_data/             # Wind field data
 │   ├── __init__.py
-│   └── wind_field.py      # 4D wind field class
+│   ├── wind_field.py      # 5D wind field class (component, z, y, x, time)
+│   ├── openfoam_loader.py # OpenFOAM .raw file parser
+│   └── sample_wind_data/  # Bundled OpenFOAM sample (90 time steps × 3 Z-heights)
 └── python/                # Portable Python installation (Windows)
 ```
 
@@ -121,11 +124,13 @@ If you prefer to use your own Python installation:
 | Toggle Grid | G key |
 | Toggle Wind Vectors | W key |
 | Reset Camera | C key |
+| Lift object off ground | Hold **Shift** while dragging (mouse up = lift, mouse down = lower) |
 
 ### Placing Objects
 
 1. **Drag and Drop**: Drag an object from the left panel onto the 3D viewport
 2. **Click and Place**: Click an object in the library, then click in the viewport to place it
+3. **Vertical placement**: After placing, drag while holding **Shift** to lift the object above the ground plane
 
 ### Object Types
 
@@ -136,11 +141,23 @@ If you prefer to use your own Python installation:
 
 ## Technical Details
 
+### Coordinate Convention
+
+The simulator uses a **right-handed, Z-up** world coordinate system:
+
+| Axis | Direction |
+|------|-----------|
+| +X   | Horizontal (east) |
+| +Y   | Horizontal (north) |
+| +Z   | Vertical (up) — ground plane at `z = 0` |
+
+OpenFOAM output is natively Z-up, so no axis remapping is applied when loading. Object meshes (`flag.obj`, etc.) are authored in the same Z-up convention.
+
 ### Wind Field
 
 Wind data is stored as a 5D numpy array:
 - Shape: `(component, grid_z, grid_y, grid_x, time_steps)`
-- Component order is `(u, v, w)`
+- Component order is `(u_x, u_y, u_z)` in the world frame — `u_z` is vertical wind
 - Trilinear interpolation for smooth velocity queries
 
 ### Deformation Model
@@ -180,7 +197,8 @@ At each timestep:
 To add custom OBJ files:
 
 1. Place the `.obj` file in the `objects/` folder
-2. Load it programmatically:
+2. Author the mesh in **Z-up convention** (vertical extent along the Z axis, ground at Z = 0)
+3. Load it programmatically:
    ```python
    mesh = ObjectMesh("custom", "objects/custom.obj", position=(0, 0, 0))
    scene.objects.append(mesh)
@@ -188,36 +206,48 @@ To add custom OBJ files:
 
 ## Custom Wind Data
 
-To load custom wind data:
+To load custom wind data programmatically:
 
 ```python
 import numpy as np
 
-# Create or load your wind data
 # Shape: (component, grid_z, grid_y, grid_x, time_steps)
+# Components: (u_x, u_y, u_z) in world Z-up frame
 wind_data = np.random.randn(3, 10, 20, 20, 100).astype(np.float32)
 
-# Save to file
+# x_coords / y_coords = horizontal axes; z_coords = vertical (height) axis
 np.savez_compressed(
    "wind_data/custom_wind.npz",
    wind_data=wind_data,
-   x_coords=np.arange(20),
-   y_coords=np.arange(20),
-   z_coords=np.arange(10),
-   time_coords=np.arange(100)
+   x_coords=np.arange(20, dtype=np.float32),
+   y_coords=np.arange(20, dtype=np.float32),
+   z_coords=np.arange(10, dtype=np.float32),
+   time_coords=np.arange(100, dtype=np.float32)
 )
 
-# Load in application
 wind_field.load_from_file("wind_data/custom_wind.npz")
 ```
 
 ## OpenFOAM Wind Data
 
-You can load OpenFOAM `postProcessing/surfaces` output directly from the UI:
+### Bundled sample (auto-loaded on startup)
+
+The repository includes a sample dataset at `wind_data/sample_wind_data/` — 90 time steps at three height slices (2 m, 5 m, 10 m). It is parsed in a background thread immediately after the window opens. The status bar shows **"Loading sample wind…"** while parsing and **"OpenFOAM sample loaded"** when complete. The grid auto-fits to the sample's spatial bounds.
+
+### Loading a different dataset
 
 1. Open the **File** menu and choose **Load OpenFOAM Wind...**
-2. Select the `postProcessing/surfaces` folder
-3. The loader will extract wind data into the 5D array layout above
+2. Select a folder that contains time-step subdirectories, each holding `U_zNormal_*.raw` files
+3. The loader reads the raw slices, builds the 5D wind array (Z-up, no axis remapping), and fits the grid
+
+### Expected `.raw` file format
+
+```
+# U  POINT_DATA <n>
+# x y z  U_x U_y U_z
+80.0 290.0 2.0  16.2  -0.04  -0.008
+...
+```
 
 Wind time advances based on real wall-clock time, updating every 0.1 seconds.
 

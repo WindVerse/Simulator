@@ -26,8 +26,8 @@ class Camera:
     def __init__(self):
         """Initialize camera with default values."""
         self.position = np.array([10.0, 10.0, 10.0], dtype=np.float32)
-        self.target = np.array([0.0, 2.0, 0.0], dtype=np.float32)
-        self.up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+        self.up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         
         # Orbit parameters
         self.distance = 15.0
@@ -47,14 +47,16 @@ class Camera:
         self._update_position()
     
     def _update_position(self):
-        """Update camera position based on orbit parameters."""
+        """Update camera position based on orbit parameters (Z-up world)."""
         azimuth_rad = np.radians(self.azimuth)
         elevation_rad = np.radians(self.elevation)
-        
-        x = self.distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
-        y = self.distance * np.sin(elevation_rad)
-        z = self.distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
-        
+
+        # Horizontal (X/Y) ring at radius cos(elevation), vertical (Z) lift = sin(elevation)
+        horizontal = self.distance * np.cos(elevation_rad)
+        x = horizontal * np.sin(azimuth_rad)
+        y = horizontal * np.cos(azimuth_rad)
+        z = self.distance * np.sin(elevation_rad)
+
         self.position = self.target + np.array([x, y, z])
     
     def orbit(self, delta_azimuth: float, delta_elevation: float):
@@ -151,7 +153,7 @@ class Camera:
         self.distance = 15.0
         self.azimuth = 45.0
         self.elevation = 30.0
-        self.target = np.array([0.0, 2.0, 0.0], dtype=np.float32)
+        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
         self._update_position()
 
 
@@ -393,55 +395,55 @@ class Scene:
     
     def snap_to_grid(self, position: np.ndarray) -> np.ndarray:
         """
-        Snap a position to the nearest grid point.
-        
+        Snap a position to the nearest grid point on the X/Y ground plane.
+
         Args:
             position: World position
-            
+
         Returns:
             Snapped position
         """
-        center_x, center_z = self.grid_center
+        center_x, center_y = self.grid_center
         snapped = position.copy()
         snapped[0] = (
             center_x +
             np.round((position[0] - center_x) / self.grid_spacing) * self.grid_spacing
         )
-        snapped[2] = (
-            center_z +
-            np.round((position[2] - center_z) / self.grid_spacing) * self.grid_spacing
+        snapped[1] = (
+            center_y +
+            np.round((position[1] - center_y) / self.grid_spacing) * self.grid_spacing
         )
-        snapped[1] = 0  # Keep y at ground level
+        snapped[2] = 0  # Keep z at ground level (Z-up world)
         return snapped
-    
+
     def get_grid_points(self) -> np.ndarray:
         """
-        Get all grid point positions.
-        
+        Get all grid point positions on the X/Y ground plane.
+
         Returns:
             Array of grid point positions
         """
-        center_x, center_z = self.grid_center
+        center_x, center_y = self.grid_center
         x = center_x + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
-        z = center_z + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
-        
-        X, Z = np.meshgrid(x, z)
-        Y = np.zeros_like(X)
-        
+        y = center_y + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
+
+        X, Y = np.meshgrid(x, y)
+        Z = np.zeros_like(X)
+
         points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
         return points.astype(np.float32)
-    
+
     def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get the bounding box of the scene.
-        
+
         Returns:
             Tuple of (min_corner, max_corner)
         """
-        center_x, center_z = self.grid_center
+        center_x, center_y = self.grid_center
         half_size = self.grid_size // 2 * self.grid_spacing
-        min_corner = np.array([center_x - half_size, 0, center_z - half_size])
-        max_corner = np.array([center_x + half_size, 10, center_z + half_size])
+        min_corner = np.array([center_x - half_size, center_y - half_size, 0])
+        max_corner = np.array([center_x + half_size, center_y + half_size, 10])
         
         # Include objects
         for obj in self.objects:

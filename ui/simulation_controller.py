@@ -6,7 +6,6 @@ Manages the simulation loop for wind deformation.
 import numpy as np
 from typing import Optional, Callable, List
 import time
-from models import config as cfg
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 import sys
@@ -14,7 +13,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
-from models.deformation_model import DeformationModel, SimplifiedPhysicsModel
+from models.deformation_model import DeformationModel
+from models import config as cfg
 from objects.object_mesh import ObjectMesh
 
 
@@ -42,34 +42,31 @@ class SimulationController(QObject):
         self,
         scene: Scene,
         deformation_model: Optional[DeformationModel] = None,
-        target_fps: int = 60
     ):
         """
         Initialize the simulation controller.
-        
+
+        The tick rate is locked to ``cfg.FPS`` — the rate the deformation
+        model was trained at. Decoupling the simulation loop from render
+        FPS would feed the Verlet integrator with mismatched dt and cause
+        runaway vertex displacement.
+
         Args:
             scene: The scene to simulate
             deformation_model: ML model for deformation (creates default if None)
-            target_fps: Target frames per second
         """
         super().__init__()
-        
+
         self.scene = scene
         self.deformation_model = deformation_model or DeformationModel()
-        
-        # Fallback physics model
-        self.physics_model = SimplifiedPhysicsModel()
-        self.use_ml_model = True
-        
+
         # ML Object tracking
         self.object_payloads = []
-        
-        # Timing
-        self.target_fps = target_fps
-        self._dt = 1.0 / target_fps
+
+        # Timing — locked to the trained model rate.
+        self.target_fps = cfg.FPS
+        self._dt = cfg.DELTA_T
         self._last_update_time = 0.0
-        self._wind_step_interval = 0.1
-        self._wind_time_accumulator = 0.0
         
         # Simulation state
         self._is_running = False
@@ -106,13 +103,8 @@ class SimulationController(QObject):
         self._is_running = True
         self._is_paused = False
         self._last_update_time = time.time()
-        self._wind_time_accumulator = 0.0
         self._timer.start(int(1000 / self.target_fps))
-        
-        # Reset physics velocities for all objects
-        for obj in self.scene.objects:
-            self.physics_model.reset(obj.get_vertex_count())
-        
+
         self.simulation_started.emit()
     
     def stop(self):
@@ -132,7 +124,6 @@ class SimulationController(QObject):
         if self._is_running and self._is_paused:
             self._is_paused = False
             self._last_update_time = time.time()
-            self._wind_time_accumulator = 0.0
             self._timer.start(int(1000 / self.target_fps))
     
     def toggle_pause(self):
@@ -155,8 +146,7 @@ class SimulationController(QObject):
         # Reset counters
         self._frame_count = 0
         self._simulation_time = 0.0
-        self._wind_time_accumulator = 0.0
-        
+
         self.simulation_updated.emit()
     
     def _simulation_step(self):
@@ -167,17 +157,14 @@ class SimulationController(QObject):
         current_time = time.time()
         dt = current_time - self._last_update_time
         self._last_update_time = current_time
-        
-        # Update wind field time
-        self._wind_time_accumulator += dt
-        if self._wind_time_accumulator >= self._wind_step_interval:
-            steps = int(self._wind_time_accumulator // self._wind_step_interval)
-            self.scene.wind_field.advance_time(steps)
-            self._wind_time_accumulator -= steps * self._wind_step_interval
-        
+
+        # Tick rate is locked to cfg.FPS, so advance wind exactly one step
+        # per tick — keeps wind dt aligned with the model's training dt.
+        self.scene.wind_field.advance_time(1)
+
         # Update each object
         for obj in self.scene.objects:
-            self._update_object(obj, dt)
+            self._update_object(obj)
         
         # Update counters
         self._frame_count += 1
@@ -193,45 +180,42 @@ class SimulationController(QObject):
         for callback in self._update_callbacks:
             callback()
     
-    def _update_object(self, obj: ObjectMesh, dt: float):
+    def _update_object(self, obj: ObjectMesh):
         """
-        Update a single object's deformation.
-        
+        Update a single object's deformation using the MeshGraphNet model.
+
         Args:
             obj: The object to update
-            dt: Time step
         """
+
+        if not self.deformation_model.is_loaded:
+            return
 
         # Get rest lengths of the edges
         rest_lengths = obj.rest_lengths
 
-        # Get wind at object position
+        # Get wind at object position (world frame, Z-up).
+        # flag.obj vertices are Z-up (Y=0 everywhere), so world-frame wind is passed
+        # directly to predict() without any axis remap.
         wind_velocity = self.scene.get_wind_at_object(obj)
-        
+
         # Get current vertex data
         vertices = obj.current_vertices.copy()
         previous_vertices = obj.previous_vertices.copy()
-        
-        if self.use_ml_model and self.deformation_model.is_loaded:
-            # Use ML model for prediction
 
-            displacement = self.deformation_model.predict(
-                vertices,
-                wind_velocity,
-                previous_vertices,
-                rest_lengths
-            )
-        else:
-            # Use physics-based fallback
-            displacement = self.physics_model.compute_displacement(
-                vertices,
-                obj.vertices,  # Original positions
-                wind_velocity,
-                dt
-            )
-        
-        # Apply deformation (with constraints)
-        new_vertices = self._apply_constraints(obj, vertices + displacement)
+        # Run MeshGraphNet inference — returns next-frame positions, or None
+        # if the object's topology does not match the trained mesh.
+        next_vertices = self.deformation_model.predict(
+            vertices,
+            wind_velocity,
+            previous_vertices,
+            rest_lengths,
+        )
+        if next_vertices is None:
+            return
+
+        # Apply object-specific constraints and commit
+        new_vertices = self._apply_constraints(obj, next_vertices)
         obj.update_vertices(new_vertices)
     
     def _apply_constraints(
@@ -312,23 +296,6 @@ class SimulationController(QObject):
         if callback in self._update_callbacks:
             self._update_callbacks.remove(callback)
     
-    def set_target_fps(self, fps: int):
-        """
-        Set target FPS.
-        
-        Args:
-            fps: Target frames per second
-        """
-        self.target_fps = max(1, min(fps, 120))
-        self._dt = 1.0 / self.target_fps
-        
-        if self._is_running and not self._is_paused:
-            self._timer.setInterval(int(1000 / self.target_fps))
-    
-    def toggle_model_type(self):
-        """Toggle between ML model and physics model."""
-        self.use_ml_model = not self.use_ml_model
-    
     @property
     def is_running(self) -> bool:
         """Check if simulation is running."""
@@ -369,5 +336,4 @@ class SimulationController(QObject):
             'fps': self._current_fps,
             'object_count': len(self.scene.objects),
             'wind_time': self.scene.wind_field.current_time,
-            'using_ml_model': self.use_ml_model
         }
