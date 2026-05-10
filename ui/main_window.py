@@ -464,6 +464,11 @@ class MainWindow(QMainWindow):
         # Control panel display toggles
         self.control_panel.grid_cb.toggled.connect(self._toggle_grid)
         self.control_panel.wind_cb.toggled.connect(self._toggle_wind)
+
+        # Redirect the ControlPanel reset button to the full reset handler so the
+        # Play button unchecks and the viewport repaints explicitly.
+        self.control_panel.reset_btn.clicked.disconnect()
+        self.control_panel.reset_btn.clicked.connect(self._reset_simulation)
     
     def _setup_update_timer(self):
         """Set up UI update timer."""
@@ -621,6 +626,7 @@ class MainWindow(QMainWindow):
         """Apply parsed sample wind data on the UI thread."""
         try:
             self.wind_field.set_wind_data(data, x_coords, y_coords, z_coords, time_coords)
+            self.scene.reset_all_objects()
             self._fit_grid_to_wind_field()
             self.status_label.setText("OpenFOAM sample loaded")
             self.gl_widget.update()
@@ -664,6 +670,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Failed to load OpenFOAM wind data")
             return
 
+        self.scene.reset_all_objects()
         self._fit_grid_to_wind_field()
         self.status_label.setText(f"OpenFOAM wind loaded from {base_dir}")
         self.gl_widget.update()
