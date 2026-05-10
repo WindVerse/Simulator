@@ -5,7 +5,7 @@ Primary application window containing all UI components.
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QToolBar, QAction, QStatusBar, QLabel, QSlider,
+    QToolBar, QAction, QStatusBar, QLabel,
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
     QFrame, QGroupBox, QCheckBox, QPushButton
 )
@@ -113,26 +113,7 @@ class ControlPanel(QWidget):
             }
         """)
         sim_layout.addWidget(self.reset_btn)
-        
-        # FPS slider
-        fps_layout = QHBoxLayout()
-        fps_label = QLabel("FPS:")
-        fps_label.setStyleSheet("color: #ccc;")
-        self.fps_slider = QSlider(Qt.Horizontal)
-        self.fps_slider.setMinimum(10)
-        self.fps_slider.setMaximum(120)
-        self.fps_slider.setValue(60)
-        self.fps_slider.valueChanged.connect(self.controller.set_target_fps)
-        self.fps_value = QLabel("60")
-        self.fps_value.setStyleSheet("color: #ccc; min-width: 30px;")
-        self.fps_slider.valueChanged.connect(
-            lambda v: self.fps_value.setText(str(v))
-        )
-        fps_layout.addWidget(fps_label)
-        fps_layout.addWidget(self.fps_slider)
-        fps_layout.addWidget(self.fps_value)
-        sim_layout.addLayout(fps_layout)
-        
+
         layout.addWidget(sim_group)
         
         # Display options group

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
 from models.deformation_model import DeformationModel
+from models import config as cfg
 from objects.object_mesh import ObjectMesh
 
 
@@ -41,30 +42,31 @@ class SimulationController(QObject):
         self,
         scene: Scene,
         deformation_model: Optional[DeformationModel] = None,
-        target_fps: int = 60
     ):
         """
         Initialize the simulation controller.
-        
+
+        The tick rate is locked to ``cfg.FPS`` — the rate the deformation
+        model was trained at. Decoupling the simulation loop from render
+        FPS would feed the Verlet integrator with mismatched dt and cause
+        runaway vertex displacement.
+
         Args:
             scene: The scene to simulate
             deformation_model: ML model for deformation (creates default if None)
-            target_fps: Target frames per second
         """
         super().__init__()
-        
+
         self.scene = scene
         self.deformation_model = deformation_model or DeformationModel()
 
         # ML Object tracking
         self.object_payloads = []
-        
-        # Timing
-        self.target_fps = target_fps
-        self._dt = 1.0 / target_fps
+
+        # Timing — locked to the trained model rate.
+        self.target_fps = cfg.FPS
+        self._dt = cfg.DELTA_T
         self._last_update_time = 0.0
-        self._wind_step_interval = 0.1
-        self._wind_time_accumulator = 0.0
         
         # Simulation state
         self._is_running = False
@@ -101,7 +103,6 @@ class SimulationController(QObject):
         self._is_running = True
         self._is_paused = False
         self._last_update_time = time.time()
-        self._wind_time_accumulator = 0.0
         self._timer.start(int(1000 / self.target_fps))
 
         self.simulation_started.emit()
@@ -123,7 +124,6 @@ class SimulationController(QObject):
         if self._is_running and self._is_paused:
             self._is_paused = False
             self._last_update_time = time.time()
-            self._wind_time_accumulator = 0.0
             self._timer.start(int(1000 / self.target_fps))
     
     def toggle_pause(self):
@@ -146,8 +146,7 @@ class SimulationController(QObject):
         # Reset counters
         self._frame_count = 0
         self._simulation_time = 0.0
-        self._wind_time_accumulator = 0.0
-        
+
         self.simulation_updated.emit()
     
     def _simulation_step(self):
@@ -158,14 +157,11 @@ class SimulationController(QObject):
         current_time = time.time()
         dt = current_time - self._last_update_time
         self._last_update_time = current_time
-        
-        # Update wind field time
-        self._wind_time_accumulator += dt
-        if self._wind_time_accumulator >= self._wind_step_interval:
-            steps = int(self._wind_time_accumulator // self._wind_step_interval)
-            self.scene.wind_field.advance_time(steps)
-            self._wind_time_accumulator -= steps * self._wind_step_interval
-        
+
+        # Tick rate is locked to cfg.FPS, so advance wind exactly one step
+        # per tick — keeps wind dt aligned with the model's training dt.
+        self.scene.wind_field.advance_time(1)
+
         # Update each object
         for obj in self.scene.objects:
             self._update_object(obj)
@@ -299,19 +295,6 @@ class SimulationController(QObject):
         """
         if callback in self._update_callbacks:
             self._update_callbacks.remove(callback)
-    
-    def set_target_fps(self, fps: int):
-        """
-        Set target FPS.
-        
-        Args:
-            fps: Target frames per second
-        """
-        self.target_fps = max(1, min(fps, 120))
-        self._dt = 1.0 / self.target_fps
-        
-        if self._is_running and not self._is_paused:
-            self._timer.setInterval(int(1000 / self.target_fps))
     
     @property
     def is_running(self) -> bool:
