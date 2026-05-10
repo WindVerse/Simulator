@@ -130,21 +130,7 @@ class ControlPanel(QWidget):
         display_layout.addWidget(self.wind_cb)
         
         layout.addWidget(display_group)
-        
-        # Model options group
-        model_group = QGroupBox("Deformation Model")
-        model_layout = QVBoxLayout(model_group)
-        
-        self.ml_model_cb = QCheckBox("Use ML Model")
-        self.ml_model_cb.setChecked(True)
-        self.ml_model_cb.setStyleSheet("color: #ccc;")
-        self.ml_model_cb.toggled.connect(
-            lambda: setattr(self.controller, 'use_ml_model', self.ml_model_cb.isChecked())
-        )
-        model_layout.addWidget(self.ml_model_cb)
-        
-        layout.addWidget(model_group)
-        
+
         # Stats display
         stats_group = QGroupBox("Statistics")
         stats_layout = QVBoxLayout(stats_group)
