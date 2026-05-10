@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
     QFrame, QGroupBox, QCheckBox, QPushButton
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
 
 import sys
@@ -22,9 +22,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from renderer.scene import Scene
 from renderer.opengl_widget import OpenGLWidget
 from wind_data.wind_field import WindField
+from wind_data.openfoam_loader import extract_openfoam_wind
 from models.deformation_model import DeformationModel
 from ui.object_library import ObjectLibraryPanel
 from ui.simulation_controller import SimulationController
+
+
+class _OpenFOAMLoadWorker(QThread):
+    """Background thread that parses an OpenFOAM sample folder off the UI thread."""
+
+    finished_ok = pyqtSignal(object, object, object, object, object)  # data, x, y, z, t
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_dir: str, parent=None):
+        super().__init__(parent)
+        self._base_dir = base_dir
+
+    def run(self):
+        try:
+            data, x_coords, y_coords, z_coords, time_coords = extract_openfoam_wind(self._base_dir)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(data, x_coords, y_coords, z_coords, time_coords)
 
 
 class ControlPanel(QWidget):
@@ -201,11 +221,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         """Initialize the main window."""
         super().__init__()
-        
+
+        self._sample_load_worker = None
+
         self._setup_components()
         self._setup_ui()
         self._setup_connections()
         self._setup_update_timer()
+
+        # Load bundled OpenFOAM sample asynchronously so the window appears immediately.
+        QTimer.singleShot(0, self._load_default_sample_async)
     
     def _setup_components(self):
         """Initialize core components."""
@@ -564,6 +589,55 @@ class MainWindow(QMainWindow):
             self.gl_widget.update()
             self.status_label.setText(f"Scene loaded from {filepath}")
 
+    def _load_default_sample_async(self):
+        """Kick off background load of the bundled OpenFOAM sample dataset."""
+        sample_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..",
+                "wind_data",
+                "sample_wind_data",
+            )
+        )
+        if not os.path.isdir(sample_path):
+            return  # No bundled sample; keep demo wind silently.
+
+        if self._sample_load_worker is not None and self._sample_load_worker.isRunning():
+            return
+
+        self.status_label.setText("Loading sample wind...")
+        self.control_panel.play_btn.setEnabled(False)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(False)
+
+        worker = _OpenFOAMLoadWorker(sample_path, self)
+        worker.finished_ok.connect(self._on_sample_load_finished)
+        worker.failed.connect(self._on_sample_load_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._sample_load_worker = worker
+        worker.start()
+
+    def _on_sample_load_finished(self, data, x_coords, y_coords, z_coords, time_coords):
+        """Apply parsed sample wind data on the UI thread."""
+        try:
+            self.wind_field.set_wind_data(data, x_coords, y_coords, z_coords, time_coords)
+            self._fit_grid_to_wind_field()
+            self.status_label.setText("OpenFOAM sample loaded")
+            self.gl_widget.update()
+        finally:
+            self.control_panel.play_btn.setEnabled(True)
+            if hasattr(self, "play_action"):
+                self.play_action.setEnabled(True)
+            self._sample_load_worker = None
+
+    def _on_sample_load_failed(self, message: str):
+        """Restore controls and surface the error in the status bar."""
+        self.status_label.setText(f"Sample load failed: {message}")
+        self.control_panel.play_btn.setEnabled(True)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(True)
+        self._sample_load_worker = None
+
     def _load_openfoam_wind(self):
         """Load OpenFOAM wind data from a folder."""
         base_dir = QFileDialog.getExistingDirectory(
@@ -595,26 +669,26 @@ class MainWindow(QMainWindow):
         self.gl_widget.update()
     
     def _fit_grid_to_wind_field(self):
-        """Resize and center the ground grid around the loaded wind field."""
+        """Resize and center the ground grid around the loaded wind field (Z-up world)."""
         min_corner, max_corner = self.wind_field.get_bounds()
         min_x, max_x = float(min_corner[0]), float(max_corner[0])
-        min_z, max_z = float(min_corner[2]), float(max_corner[2])
-        
+        min_y, max_y = float(min_corner[1]), float(max_corner[1])
+
         spacing = self._infer_horizontal_grid_spacing()
         center_x = (min_x + max_x) / 2.0
-        center_z = (min_z + max_z) / 2.0
-        half_extent = max((max_x - min_x) / 2.0, (max_z - min_z) / 2.0, spacing)
+        center_y = (min_y + max_y) / 2.0
+        half_extent = max((max_x - min_x) / 2.0, (max_y - min_y) / 2.0, spacing)
         half_steps = max(1, int(math.ceil(half_extent / spacing)))
-        
-        self.scene.grid_center = (center_x, center_z)
+
+        self.scene.grid_center = (center_x, center_y)
         self.scene.grid_spacing = spacing
         self.scene.grid_size = half_steps * 2
-    
+
     def _infer_horizontal_grid_spacing(self) -> float:
-        """Infer a display grid spacing from loaded wind X/Z coordinates."""
+        """Infer a display grid spacing from loaded wind X/Y coordinates."""
         spacing_candidates = []
-        
-        for coords in (self.wind_field.x_coords, self.wind_field.z_coords):
+
+        for coords in (self.wind_field.x_coords, self.wind_field.y_coords):
             unique_coords = sorted({float(coord) for coord in coords})
             diffs = [
                 b - a

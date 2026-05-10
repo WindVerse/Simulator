@@ -198,7 +198,9 @@ class SimulationController(QObject):
         # Get rest lengths of the edges
         rest_lengths = obj.rest_lengths
 
-        # Get wind at object position
+        # Get wind at object position (world frame, Z-up).
+        # flag.obj vertices are Z-up (Y=0 everywhere), so world-frame wind is passed
+        # directly to predict() without any axis remap.
         wind_velocity = self.scene.get_wind_at_object(obj)
 
         # Get current vertex data
