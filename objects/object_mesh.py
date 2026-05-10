@@ -295,6 +295,10 @@ class ObjectMesh:
         
         self.vertices = np.array(vertices, dtype=np.float32)
         self.faces = np.array(faces, dtype=np.int32)
+
+        # Initialize current and previous vertices before normal computation.
+        self.current_vertices = self.vertices.copy()
+        self.previous_vertices = self.vertices.copy()
         
         if normals:
             self.normals = np.array(normals, dtype=np.float32)
@@ -303,10 +307,6 @@ class ObjectMesh:
         
         if texture_coords:
             self.texture_coords = np.array(texture_coords, dtype=np.float32)
-        
-        # Initialize current and previous vertices
-        self.current_vertices = self.vertices.copy()
-        self.previous_vertices = self.vertices.copy()
     
     def save_to_obj(self, filepath: str):
         """

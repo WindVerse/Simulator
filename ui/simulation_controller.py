@@ -204,7 +204,6 @@ class SimulationController(QObject):
 
         # Get rest lengths of the edges
         rest_lengths = obj.rest_lengths
-        print(rest_lengths)
 
         # Get wind at object position
         wind_velocity = self.scene.get_wind_at_object(obj)
