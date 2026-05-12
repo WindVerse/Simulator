@@ -1,415 +1,213 @@
 """
 DeformationModel Class
-PyTorch-based ML model for predicting mesh vertex displacement.
-Falls back to physics-based model if PyTorch is not available.
+PyTorch-based ML model (MeshGraphNet) for predicting mesh vertex deformation.
 """
 
-import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 import os
+import numpy as np
+import torch
 
-# Try to import PyTorch, fall back gracefully if not available
-TORCH_AVAILABLE = False
-try:
-    import torch
-    import torch.nn as nn
-    TORCH_AVAILABLE = True
-except (ImportError, OSError) as e:
-    print(f"PyTorch not available: {e}")
-    print("Using physics-based deformation model instead.")
-    torch = None
-    nn = None
-
-
-# Only define DeformationNetwork if PyTorch is available
-if TORCH_AVAILABLE:
-    class DeformationNetwork(nn.Module):
-        """
-        Neural network for predicting vertex displacements.
-        
-        Architecture:
-        - Input: concatenated vertex positions, wind velocity, previous state
-        - Hidden layers with ReLU activation
-        - Output: vertex displacement vectors
-        """
-        
-        def __init__(
-            self,
-            vertex_dim: int = 3,
-            wind_dim: int = 3,
-            hidden_dim: int = 256,
-            num_layers: int = 4
-        ):
-            """
-            Initialize the deformation network.
-            
-            Args:
-                vertex_dim: Dimension of vertex positions (3 for xyz)
-                wind_dim: Dimension of wind velocity (3 for uvw)
-                hidden_dim: Hidden layer dimension
-                num_layers: Number of hidden layers
-            """
-            super().__init__()
-            
-            # Input: current vertex (3) + wind (3) + previous vertex (3) = 9
-            input_dim = vertex_dim * 2 + wind_dim
-            
-            layers = []
-            
-            # Input layer
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.LayerNorm(hidden_dim))
-            
-            # Hidden layers
-            for _ in range(num_layers - 1):
-                layers.append(nn.Linear(hidden_dim, hidden_dim))
-                layers.append(nn.ReLU())
-                layers.append(nn.LayerNorm(hidden_dim))
-            
-            # Output layer
-            layers.append(nn.Linear(hidden_dim, vertex_dim))
-            
-            self.network = nn.Sequential(*layers)
-            
-            # Initialize weights
-            self._init_weights()
-        
-        def _init_weights(self):
-            """Initialize network weights."""
-            for module in self.modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.xavier_uniform_(module.weight)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-        
-        def forward(
-            self,
-            vertices: 'torch.Tensor',
-            wind: 'torch.Tensor',
-            prev_vertices: 'torch.Tensor'
-        ) -> 'torch.Tensor':
-            """
-            Forward pass to predict displacement.
-            
-            Args:
-                vertices: Current vertex positions (B, N, 3)
-                wind: Wind velocity vector (B, 3) or (B, N, 3)
-                prev_vertices: Previous vertex positions (B, N, 3)
-                
-            Returns:
-                Displacement vectors (B, N, 3)
-            """
-            batch_size = vertices.shape[0]
-            num_vertices = vertices.shape[1]
-            
-            # Expand wind to per-vertex if needed
-            if wind.dim() == 2:
-                wind = wind.unsqueeze(1).expand(-1, num_vertices, -1)
-            
-            # Concatenate inputs
-            x = torch.cat([vertices, wind, prev_vertices], dim=-1)
-            
-            # Flatten for processing
-            x = x.view(batch_size * num_vertices, -1)
-            
-            # Process through network
-            displacement = self.network(x)
-            
-            # Reshape back
-            displacement = displacement.view(batch_size, num_vertices, -1)
-            
-            return displacement
-else:
-    # Dummy class when PyTorch is not available
-    DeformationNetwork = None
+from . import config as cfg
+from .load_model import load_model
 
 
 class DeformationModel:
     """
-    Manages the deformation prediction model.
-    
-    Handles model loading, inference, and GPU acceleration.
-    Falls back to physics-based model if PyTorch is not available.
-    
-    Attributes:
-        network: The neural network (None if PyTorch unavailable)
-        device: Computation device (CPU/GPU)
-        is_loaded: Whether a pretrained model is loaded
+    Manages the MeshGraphNet deformation prediction model.
+
+    Loads pretrained weights from best_model.pth and runs inference to
+    produce next-frame vertex positions for the trained flag topology.
     """
-    
-    def __init__(
-        self,
-        model_path: Optional[str] = None,
-        hidden_dim: int = 256,
-        num_layers: int = 4,
-        use_gpu: bool = True
-    ):
-        """
-        Initialize the deformation model.
-        
-        Args:
-            model_path: Path to pretrained model weights
-            hidden_dim: Hidden layer dimension
-            num_layers: Number of hidden layers
-            use_gpu: Whether to use GPU if available
-        """
-        self.network = None
-        self.device = None
+
+    def __init__(self, use_gpu: bool = True):
+        self.model = None
         self.is_loaded = False
-        
-        if not TORCH_AVAILABLE:
-            print("PyTorch not available - ML model disabled, using physics model")
-            return
-        
-        # Set device
+        self.object_payloads = []
+
+        # Device
         if use_gpu and torch.cuda.is_available():
             self.device = torch.device('cuda')
             print(f"Using GPU: {torch.cuda.get_device_name(0)}")
         else:
             self.device = torch.device('cpu')
             print("Using CPU")
-        
-        # Initialize network
-        self.network = DeformationNetwork(
-            hidden_dim=hidden_dim,
-            num_layers=num_layers
-        ).to(self.device)
-        
-        # Load pretrained weights if provided
-        if model_path and os.path.exists(model_path):
-            self.load_model(model_path)
-        else:
-            # Initialize with physics-inspired weights for demonstration
-            self._init_physics_inspired()
-            self.is_loaded = True
-    
-    def _init_physics_inspired(self):
-        """
-        Initialize model with physics-inspired behavior.
-        This provides reasonable default behavior without training.
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            return
-        # The default initialization will give small random displacements
-        # For demonstration, we'll use the network as-is
-        self.network.eval()
-    
-    def load_model(self, model_path: str):
-        """
-        Load pretrained model weights.
-        
-        Args:
-            model_path: Path to the model file (.pt or .pth)
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            print("PyTorch not available - cannot load model")
-            return
-        try:
-            state_dict = torch.load(model_path, map_location=self.device)
-            self.network.load_state_dict(state_dict)
-            self.is_loaded = True
-            print(f"Model loaded from {model_path}")
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            self.is_loaded = False
-    
-    def save_model(self, model_path: str):
-        """
-        Save model weights.
-        
-        Args:
-            model_path: Path to save the model
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            print("PyTorch not available - cannot save model")
-            return
-        torch.save(self.network.state_dict(), model_path)
-        print(f"Model saved to {model_path}")
-    
+
+        # Trained topology + pin mask (matches the bundled flag.obj: HEIGHT*WIDTH vertices)
+        self.edge_index = torch.from_numpy(np.load(cfg.TOPOLOGY_PATH)).long().to(self.device)
+        self.batch_pin_mask = cfg.PIN_MASK.to(self.device)
+        self.pin_mask_bool = self.batch_pin_mask.squeeze(-1).bool()
+        self.expected_num_vertices = cfg.NUM_VERTICES
+
+        # Strain projection (PBD) — clamp edges to within MAX_STRAIN × rest_length
+        # after the unbounded model decoder, otherwise OOD wind can blow vertices
+        # off the mesh. Jacobi-style updates need to be scaled by 1/degree so
+        # simultaneous corrections from a vertex's ~8 neighbours don't overshoot.
+        self.max_strain = 1.10
+        self.projection_iters = 12
+        row, _ = self.edge_index
+        deg = torch.bincount(row, minlength=cfg.NUM_VERTICES).clamp_min(1).float()
+        self.inv_degree = (1.0 / deg).unsqueeze(-1)
+
+        # Load model
+        self.model = load_model(self.device)
+        model_path = os.path.join(os.path.dirname(__file__), "best_model.pth")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model not found at {model_path}")
+        self.model.load_state_dict(
+            torch.load(model_path, map_location=self.device, weights_only=True)
+        )
+        self.model.eval()
+        self.is_loaded = True
+
+    def register_object_payload(self, payload: dict):
+        """Register object payload (e.g. pole center) for ML parsing."""
+        self.object_payloads.append(payload)
+
+    @staticmethod
+    def integrate(pos, vel, accel, dt):
+        """P_{t+1} = P_t + V_t*dt + 0.5*A*dt^2"""
+        new_pos = pos + (vel * dt) + (0.5 * accel * (dt ** 2))
+        new_vel = vel + (accel * dt)
+        return new_pos, new_vel
+
     def predict(
         self,
         vertices: np.ndarray,
         wind_velocity: np.ndarray,
         previous_vertices: np.ndarray,
-        damping: float = 0.95,
-        max_displacement: float = 0.5
-    ) -> np.ndarray:
+        rest_lengths,
+    ) -> Optional[np.ndarray]:
         """
-        Predict vertex displacement based on wind and previous state.
-        
-        Args:
-            vertices: Current vertex positions (N, 3)
-            wind_velocity: Wind velocity vector (3,)
-            previous_vertices: Previous vertex positions (N, 3)
-            damping: Damping factor for displacement
-            max_displacement: Maximum allowed displacement magnitude
-            
-        Returns:
-            Displacement vectors (N, 3)
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            # Return zero displacement if PyTorch not available
-            return np.zeros_like(vertices)
-        
-        with torch.no_grad():
-            self.network.eval()
-            
-            # Convert to tensors
-            verts_tensor = torch.from_numpy(vertices).float().unsqueeze(0).to(self.device)
-            wind_tensor = torch.from_numpy(wind_velocity).float().unsqueeze(0).to(self.device)
-            prev_tensor = torch.from_numpy(previous_vertices).float().unsqueeze(0).to(self.device)
-            
-            # Predict displacement
-            displacement = self.network(verts_tensor, wind_tensor, prev_tensor)
-            
-            # Apply physics-based adjustments
-            # Scale by wind magnitude
-            wind_magnitude = torch.norm(wind_tensor)
-            displacement = displacement * wind_magnitude * 0.1
-            
-            # Apply damping
-            displacement = displacement * damping
-            
-            # Clamp maximum displacement
-            disp_magnitude = torch.norm(displacement, dim=-1, keepdim=True)
-            scale = torch.clamp(max_displacement / (disp_magnitude + 1e-8), max=1.0)
-            displacement = displacement * scale
-            
-            # Convert back to numpy
-            return displacement.squeeze(0).cpu().numpy()
-    
-    def predict_batch(
-        self,
-        vertices_batch: np.ndarray,
-        wind_velocities: np.ndarray,
-        previous_vertices_batch: np.ndarray
-    ) -> np.ndarray:
-        """
-        Predict displacements for multiple objects.
-        
-        Args:
-            vertices_batch: Vertex positions (B, N, 3)
-            wind_velocities: Wind velocities (B, 3)
-            previous_vertices_batch: Previous vertices (B, N, 3)
-            
-        Returns:
-            Displacement vectors (B, N, 3)
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            return np.zeros_like(vertices_batch)
-        
-        with torch.no_grad():
-            self.network.eval()
-            
-            verts_tensor = torch.from_numpy(vertices_batch).float().to(self.device)
-            wind_tensor = torch.from_numpy(wind_velocities).float().to(self.device)
-            prev_tensor = torch.from_numpy(previous_vertices_batch).float().to(self.device)
-            
-            displacement = self.network(verts_tensor, wind_tensor, prev_tensor)
-            
-            return displacement.cpu().numpy()
-    
-    def train_step(
-        self,
-        vertices,
-        wind,
-        prev_vertices,
-        target_displacement,
-        optimizer
-    ) -> float:
-        """
-        Perform one training step.
-        
-        Args:
-            vertices: Input vertices (B, N, 3)
-            wind: Wind velocities (B, 3)
-            prev_vertices: Previous vertices (B, N, 3)
-            target_displacement: Ground truth displacement (B, N, 3)
-            optimizer: PyTorch optimizer
-            
-        Returns:
-            Loss value
-        """
-        if not TORCH_AVAILABLE or self.network is None:
-            return 0.0
-        
-        self.network.train()
-        
-        optimizer.zero_grad()
-        
-        predicted = self.network(vertices, wind, prev_vertices)
-        loss = nn.functional.mse_loss(predicted, target_displacement)
-        
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
+        Predict next-frame vertex positions.
 
+        Args:
+            vertices:           Current vertex positions   (N, 3) numpy
+            wind_velocity:      Wind vector(s) — either (3,) or (8, 3) numpy
+            previous_vertices:  Previous vertex positions  (N, 3) numpy
+            rest_lengths:       Edge rest lengths          (E,)   torch tensor
 
-class SimplifiedPhysicsModel:
-    """
-    A simplified physics-based model for wind deformation.
-    Used as fallback or for comparison with ML model.
-    """
-    
-    def __init__(
-        self,
-        stiffness: float = 0.5,
-        damping: float = 0.9,
-        mass: float = 1.0
-    ):
-        """
-        Initialize physics parameters.
-        
-        Args:
-            stiffness: Spring stiffness coefficient
-            damping: Velocity damping factor
-            mass: Vertex mass
-        """
-        self.stiffness = stiffness
-        self.damping = damping
-        self.mass = mass
-        self.velocities: Optional[np.ndarray] = None
-    
-    def reset(self, num_vertices: int):
-        """Reset velocities for new simulation."""
-        self.velocities = np.zeros((num_vertices, 3), dtype=np.float32)
-    
-    def compute_displacement(
-        self,
-        vertices: np.ndarray,
-        original_vertices: np.ndarray,
-        wind_velocity: np.ndarray,
-        dt: float = 0.016
-    ) -> np.ndarray:
-        """
-        Compute displacement using simplified physics.
-        
-        Args:
-            vertices: Current vertex positions
-            original_vertices: Rest positions
-            wind_velocity: Wind velocity vector
-            dt: Time step
-            
         Returns:
-            Displacement vectors
+            next_pos: (N, 3) numpy array of next-frame positions, or None if
+                      the input topology does not match the trained mesh.
         """
-        if self.velocities is None or len(self.velocities) != len(vertices):
-            self.reset(len(vertices))
-        
-        # Wind force (simplified)
-        wind_force = wind_velocity * 0.5
-        
-        # Spring force towards original position
-        displacement = vertices - original_vertices
-        spring_force = -self.stiffness * displacement
-        
-        # Total acceleration
-        acceleration = (wind_force + spring_force) / self.mass
-        
-        # Update velocity with damping
-        self.velocities = self.velocities * self.damping + acceleration * dt
-        
-        # Compute displacement
-        return self.velocities * dt
+        if vertices.shape[0] != self.expected_num_vertices:
+            return None
+
+        with torch.no_grad():
+            # ---- Convert inputs to tensors on device ----
+            curr_pos = torch.as_tensor(vertices, device=self.device, dtype=torch.float32)
+            prev_pos = torch.as_tensor(previous_vertices, device=self.device, dtype=torch.float32)
+
+            wind_arr = np.asarray(wind_velocity, dtype=np.float32)
+            if wind_arr.ndim == 1:
+                # Broadcast a single uniform wind sample to the 8 octants the model expects
+                wind_arr = np.tile(wind_arr.reshape(1, 3), (8, 1))
+            curr_wind_raw = torch.as_tensor(wind_arr, device=self.device, dtype=torch.float32)
+
+            if torch.is_tensor(rest_lengths):
+                rest_lengths_t = rest_lengths.to(device=self.device, dtype=torch.float32)
+            else:
+                rest_lengths_t = torch.as_tensor(rest_lengths, device=self.device, dtype=torch.float32)
+
+            # ---- Kinematic velocity (matches train loop) ----
+            curr_vel = curr_pos - prev_pos
+            curr_vel_scaled = curr_vel * cfg.VEL_UP
+
+            # ---- Per-vertex wind via 8-octant lookup ----
+            x = curr_pos[:, 0]
+            y = curr_pos[:, 1]
+            z = curr_pos[:, 2]
+
+            ix = (x >= 0).long()
+            iy = (y >= 0).long()
+            iz = (z >= 0).long()
+
+            cube_index = ix * 4 + iy * 2 + iz
+            cube_index_expanded = cube_index.unsqueeze(-1).expand(-1, 3)
+
+            wind_expanded = torch.gather(curr_wind_raw, 0, cube_index_expanded)
+            wind_expanded_scaled = wind_expanded / cfg.WIND_DOWN
+
+            # ---- Node features: [vel(3), wind(3), pin_mask(1)] = 7 ----
+            node_features = torch.cat(
+                [curr_vel_scaled, wind_expanded_scaled, self.batch_pin_mask], dim=-1
+            )
+
+            # ---- Edge features: [rel_pos(3), rel_pos_norm(1), rel_vel(3), rest_len(1)] = 8 ----
+            row, col = self.edge_index
+            x_ij = curr_pos[row] - curr_pos[col]
+            x_ij_norm = torch.norm(x_ij, p=2, dim=-1, keepdim=True)
+            v_ij = curr_vel_scaled[row] - curr_vel_scaled[col]
+            rest_lengths_expanded = rest_lengths_t.unsqueeze(-1)
+
+            edge_attr = torch.cat([x_ij, x_ij_norm, v_ij, rest_lengths_expanded], dim=-1)
+
+            # ---- Inference ----
+            # Encoder applies LayerNorm internally; decoder output is in physical units.
+            pred = self.model(node_features, self.edge_index, edge_attr)
+
+            # ---- Enforce pinned-node boundary condition ----
+            H, W = cfg.HEIGHT, cfg.WIDTH
+            pinned_indices = [r * W for r in range(H)]
+            pred[pinned_indices, :] = 0.0
+
+            # ---- Physics integration ----
+            kinematic_vel = (curr_pos - prev_pos) / cfg.DELTA_T
+
+            if cfg.TARGET_TYPE in ("accelerations", "acc_new"):
+                next_pos, _ = self.integrate(curr_pos, kinematic_vel, pred, cfg.DELTA_T)
+            elif cfg.TARGET_TYPE == "acc":
+                next_pos = (2 * curr_pos) - prev_pos + pred
+            elif cfg.TARGET_TYPE == "displacements":
+                next_pos = curr_pos + pred
+            else:
+                raise ValueError(f"Unknown TARGET_TYPE in config: {cfg.TARGET_TYPE}")
+
+            # Re-pin to be safe after integration
+            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+
+            # ---- Cap per-tick displacement ----
+            # The decoder is unbounded; under OOD wind a single forward pass can
+            # produce predictions that translate vertices by several metres in
+            # one tick. Clamp the per-tick movement of each free vertex to a
+            # fraction of the mean rest length so the mesh cannot blow up
+            # before the strain projection has a chance to act.
+            max_step = 0.5 * rest_lengths_t.mean()
+            step = next_pos - curr_pos
+            step_norm = torch.norm(step, dim=-1, keepdim=True).clamp_min(1e-8)
+            scale = torch.minimum(torch.ones_like(step_norm), max_step / step_norm)
+            next_pos = curr_pos + step * scale
+            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+
+            # ---- XPBD-style edge-length projection ----
+            # The decoder is unbounded, so without this the mesh can drift
+            # arbitrarily under OOD wind. Project any over-stretched edges back
+            # to MAX_STRAIN × rest_length, splitting the correction between free
+            # endpoints. Pinned vertices stay fixed.
+            row, col = self.edge_index
+            max_len = rest_lengths_t * self.max_strain
+            free_mask = (~self.pin_mask_bool).float().unsqueeze(-1)
+            w_row = free_mask[row]
+            w_col = free_mask[col]
+            w_sum = (w_row + w_col).clamp_min(1.0)
+
+            for _ in range(self.projection_iters):
+                delta = next_pos[row] - next_pos[col]
+                length = torch.norm(delta, dim=-1).clamp_min(1e-8)
+                excess = (length - max_len).clamp_min(0.0)
+                if excess.max() == 0:
+                    break
+                direction = delta / length.unsqueeze(-1)
+                # 0.5: edge_index is bidirectional, every undirected edge
+                # appears as both (i,j) and (j,i).
+                # inv_degree[v]: Jacobi damping — vertex v receives corrections
+                # from all its incident edges in the same pass, so divide by
+                # the vertex's degree to prevent overshoot.
+                correction = 0.5 * excess.unsqueeze(-1) * direction
+                next_pos.index_add_(0, row, -correction * (w_row / w_sum) * self.inv_degree[row])
+                next_pos.index_add_(0, col,  correction * (w_col / w_sum) * self.inv_degree[col])
+
+            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+
+            return next_pos.detach().cpu().numpy()

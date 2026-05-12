@@ -7,8 +7,10 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 import sys
 import os
-
+import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import config as cfg
+
 
 from objects.object_mesh import ObjectMesh
 from wind_data.wind_field import WindField
@@ -24,31 +26,37 @@ class Camera:
     def __init__(self):
         """Initialize camera with default values."""
         self.position = np.array([10.0, 10.0, 10.0], dtype=np.float32)
-        self.target = np.array([0.0, 2.0, 0.0], dtype=np.float32)
-        self.up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+        self.up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         
         # Orbit parameters
         self.distance = 15.0
         self.azimuth = 45.0  # Horizontal angle in degrees
         self.elevation = 30.0  # Vertical angle in degrees
         
+        # Zoom limits for ±50m grid viewing
+        self.zoom_min = 0.2  # Allow very close zoom (0.2m minimum)
+        self.zoom_max = 200.0  # Allow very far zoom (200m maximum)
+        
         # Projection parameters
         self.fov = 60.0
-        self.near = 0.1
+        self.near = 0.01  # Reduced from 0.1 for closer near plane
         self.far = 1000.0
         self.aspect = 1.0
         
         self._update_position()
     
     def _update_position(self):
-        """Update camera position based on orbit parameters."""
+        """Update camera position based on orbit parameters (Z-up world)."""
         azimuth_rad = np.radians(self.azimuth)
         elevation_rad = np.radians(self.elevation)
-        
-        x = self.distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
-        y = self.distance * np.sin(elevation_rad)
-        z = self.distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
-        
+
+        # Horizontal (X/Y) ring at radius cos(elevation), vertical (Z) lift = sin(elevation)
+        horizontal = self.distance * np.cos(elevation_rad)
+        x = horizontal * np.sin(azimuth_rad)
+        y = horizontal * np.cos(azimuth_rad)
+        z = self.distance * np.sin(elevation_rad)
+
         self.position = self.target + np.array([x, y, z])
     
     def orbit(self, delta_azimuth: float, delta_elevation: float):
@@ -65,12 +73,17 @@ class Camera:
     
     def zoom(self, delta: float):
         """
-        Zoom in or out.
+        Zoom in or out with smooth exponential scaling.
         
         Args:
             delta: Zoom amount (positive = zoom in)
         """
-        self.distance = max(1.0, self.distance - delta)
+        # Use exponential scaling for smooth zoom over large ranges
+        zoom_speed = 0.1  # Sensitivity factor
+        new_distance = self.distance * (1.0 - zoom_speed * delta)
+        
+        # Clamp to zoom limits
+        self.distance = np.clip(new_distance, self.zoom_min, self.zoom_max)
         self._update_position()
     
     def pan(self, delta_x: float, delta_y: float):
@@ -140,7 +153,7 @@ class Camera:
         self.distance = 15.0
         self.azimuth = 45.0
         self.elevation = 30.0
-        self.target = np.array([0.0, 2.0, 0.0], dtype=np.float32)
+        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
         self._update_position()
 
 
@@ -173,8 +186,11 @@ class Scene:
         self.ground_visible = True
         
         # Grid settings
-        self.grid_size = 20
+        self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = 1.0
+        self.grid_center = (0.0, 0.0)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Selection
         self.selected_object: Optional[ObjectMesh] = None
@@ -182,6 +198,81 @@ class Scene:
         # Object ID counter
         self._next_id = 0
         self._object_ids: Dict[int, ObjectMesh] = {}
+
+    def _get_default_obj_path(self, object_type: str) -> Optional[str]:
+        """Return the bundled OBJ path for a known object type, if present."""
+        candidate = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "objects",
+            f"{object_type.lower()}.obj"
+        )
+        return candidate if os.path.exists(candidate) else None
+
+    def _edge_index_from_faces(self, faces: np.ndarray, num_vertices: int) -> torch.Tensor:
+        """Build a directed edge index from mesh faces."""
+        if faces is None or len(faces) == 0:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        faces = np.asarray(faces, dtype=np.int64)
+        if faces.ndim != 2 or faces.shape[1] < 3:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        min_index = int(faces.min())
+        max_index = int(faces.max())
+        if min_index < 0 or max_index >= num_vertices:
+            raise ValueError(
+                f"Mesh face index out of bounds: valid range is [0, {num_vertices - 1}], "
+                f"but faces contain [{min_index}, {max_index}]"
+            )
+
+        edges = set()
+        for face in faces:
+            face_vertices = [int(vertex) for vertex in face]
+            for start, end in zip(face_vertices, face_vertices[1:] + face_vertices[:1]):
+                if start == end:
+                    continue
+                edges.add((start, end))
+                edges.add((end, start))
+
+        if not edges:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        return torch.tensor(sorted(edges), dtype=torch.long).t().contiguous()
+
+    def _load_edge_index_for_mesh(self, mesh: ObjectMesh) -> torch.Tensor:
+        """Load the trained topology when it matches; otherwise derive topology from faces."""
+        num_vertices = mesh.get_vertex_count()
+
+        if num_vertices == cfg.NUM_VERTICES and os.path.exists(cfg.TOPOLOGY_PATH):
+            topology = np.load(cfg.TOPOLOGY_PATH)
+            if topology.ndim == 2 and topology.shape[0] == 2 and topology.size > 0:
+                min_index = int(topology.min())
+                max_index = int(topology.max())
+                if min_index >= 0 and max_index < num_vertices:
+                    return torch.from_numpy(topology).long()
+
+        return self._edge_index_from_faces(mesh.faces, num_vertices)
+
+    def calculate_edge_lengths(self, pos, edge_index):
+        """Computes the length of every edge in the mesh."""
+        if edge_index.numel() == 0:
+            return torch.empty((0,), device=pos.device, dtype=pos.dtype)
+
+        if edge_index.dim() != 2 or edge_index.shape[0] != 2:
+            raise ValueError(f"edge_index must have shape [2, E], got {tuple(edge_index.shape)}")
+
+        num_vertices = pos.shape[0]
+        min_index = int(edge_index.min().item())
+        max_index = int(edge_index.max().item())
+        if min_index < 0 or max_index >= num_vertices:
+            raise ValueError(
+                f"edge_index out of bounds for mesh with {num_vertices} vertices: "
+                f"found indices [{min_index}, {max_index}]"
+            )
+
+        row, col = edge_index
+        vec = pos[row] - pos[col]
+        return torch.norm(vec, dim=1)
     
     def add_object(
         self,
@@ -200,10 +291,23 @@ class Scene:
         Returns:
             The created ObjectMesh
         """
+        # Create mesh first
+        if obj_path is None:
+            obj_path = self._get_default_obj_path(object_type)
+
         mesh = ObjectMesh(object_type, obj_path, position)
-        self.objects.append(mesh)
         
-        # Assign ID
+        # Load a topology that is valid for this mesh.
+        edge_index = self._load_edge_index_for_mesh(mesh).to(self.device)
+        mesh.edge_index = edge_index
+        
+        # Get mesh vertices as tensor
+        vertices_tensor = torch.from_numpy(mesh.vertices.astype(np.float32)).to(self.device)
+        
+        # Calculate and store rest_lengths in the mesh
+        mesh.rest_lengths = self.calculate_edge_lengths(vertices_tensor, edge_index)
+        
+        self.objects.append(mesh)
         self._object_ids[self._next_id] = mesh
         self._next_id += 1
         
@@ -265,6 +369,17 @@ class Scene:
         """
         self.selected_object = mesh
     
+    def move_object(self, mesh: ObjectMesh, new_position: np.ndarray) -> None:
+        """
+        Move an object to a new position.
+        
+        Args:
+            mesh: Object to move
+            new_position: New world position
+        """
+        if mesh in self.objects:
+            mesh.position = np.array(new_position, dtype=np.float32)
+    
     def get_wind_at_object(self, mesh: ObjectMesh) -> np.ndarray:
         """
         Get wind velocity at an object's position.
@@ -280,44 +395,55 @@ class Scene:
     
     def snap_to_grid(self, position: np.ndarray) -> np.ndarray:
         """
-        Snap a position to the nearest grid point.
-        
+        Snap a position to the nearest grid point on the X/Y ground plane.
+
         Args:
             position: World position
-            
+
         Returns:
             Snapped position
         """
-        snapped = np.round(position / self.grid_spacing) * self.grid_spacing
-        snapped[1] = 0  # Keep y at ground level
+        center_x, center_y = self.grid_center
+        snapped = position.copy()
+        snapped[0] = (
+            center_x +
+            np.round((position[0] - center_x) / self.grid_spacing) * self.grid_spacing
+        )
+        snapped[1] = (
+            center_y +
+            np.round((position[1] - center_y) / self.grid_spacing) * self.grid_spacing
+        )
+        snapped[2] = 0  # Keep z at ground level (Z-up world)
         return snapped
-    
+
     def get_grid_points(self) -> np.ndarray:
         """
-        Get all grid point positions.
-        
+        Get all grid point positions on the X/Y ground plane.
+
         Returns:
             Array of grid point positions
         """
-        x = np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
-        z = np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
-        
-        X, Z = np.meshgrid(x, z)
-        Y = np.zeros_like(X)
-        
+        center_x, center_y = self.grid_center
+        x = center_x + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
+        y = center_y + np.arange(-self.grid_size // 2, self.grid_size // 2 + 1) * self.grid_spacing
+
+        X, Y = np.meshgrid(x, y)
+        Z = np.zeros_like(X)
+
         points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
         return points.astype(np.float32)
-    
+
     def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get the bounding box of the scene.
-        
+
         Returns:
             Tuple of (min_corner, max_corner)
         """
+        center_x, center_y = self.grid_center
         half_size = self.grid_size // 2 * self.grid_spacing
-        min_corner = np.array([-half_size, 0, -half_size])
-        max_corner = np.array([half_size, 10, half_size])
+        min_corner = np.array([center_x - half_size, center_y - half_size, 0])
+        max_corner = np.array([center_x + half_size, center_y + half_size, 10])
         
         # Include objects
         for obj in self.objects:

@@ -5,25 +5,46 @@ Primary application window containing all UI components.
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QToolBar, QAction, QStatusBar, QLabel, QSlider,
+    QToolBar, QAction, QStatusBar, QLabel,
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
     QFrame, QGroupBox, QCheckBox, QPushButton
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
 
 import sys
 import os
 import json
+import math
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
 from renderer.opengl_widget import OpenGLWidget
 from wind_data.wind_field import WindField
+from wind_data.openfoam_loader import extract_openfoam_wind
 from models.deformation_model import DeformationModel
 from ui.object_library import ObjectLibraryPanel
 from ui.simulation_controller import SimulationController
+
+
+class _OpenFOAMLoadWorker(QThread):
+    """Background thread that parses an OpenFOAM sample folder off the UI thread."""
+
+    finished_ok = pyqtSignal(object, object, object, object, object)  # data, x, y, z, t
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_dir: str, parent=None):
+        super().__init__(parent)
+        self._base_dir = base_dir
+
+    def run(self):
+        try:
+            data, x_coords, y_coords, z_coords, time_coords = extract_openfoam_wind(self._base_dir)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(data, x_coords, y_coords, z_coords, time_coords)
 
 
 class ControlPanel(QWidget):
@@ -92,26 +113,7 @@ class ControlPanel(QWidget):
             }
         """)
         sim_layout.addWidget(self.reset_btn)
-        
-        # FPS slider
-        fps_layout = QHBoxLayout()
-        fps_label = QLabel("FPS:")
-        fps_label.setStyleSheet("color: #ccc;")
-        self.fps_slider = QSlider(Qt.Horizontal)
-        self.fps_slider.setMinimum(10)
-        self.fps_slider.setMaximum(120)
-        self.fps_slider.setValue(60)
-        self.fps_slider.valueChanged.connect(self.controller.set_target_fps)
-        self.fps_value = QLabel("60")
-        self.fps_value.setStyleSheet("color: #ccc; min-width: 30px;")
-        self.fps_slider.valueChanged.connect(
-            lambda v: self.fps_value.setText(str(v))
-        )
-        fps_layout.addWidget(fps_label)
-        fps_layout.addWidget(self.fps_slider)
-        fps_layout.addWidget(self.fps_value)
-        sim_layout.addLayout(fps_layout)
-        
+
         layout.addWidget(sim_group)
         
         # Display options group
@@ -129,21 +131,7 @@ class ControlPanel(QWidget):
         display_layout.addWidget(self.wind_cb)
         
         layout.addWidget(display_group)
-        
-        # Model options group
-        model_group = QGroupBox("Deformation Model")
-        model_layout = QVBoxLayout(model_group)
-        
-        self.ml_model_cb = QCheckBox("Use ML Model")
-        self.ml_model_cb.setChecked(True)
-        self.ml_model_cb.setStyleSheet("color: #ccc;")
-        self.ml_model_cb.toggled.connect(
-            lambda: setattr(self.controller, 'use_ml_model', self.ml_model_cb.isChecked())
-        )
-        model_layout.addWidget(self.ml_model_cb)
-        
-        layout.addWidget(model_group)
-        
+
         # Stats display
         stats_group = QGroupBox("Statistics")
         stats_layout = QVBoxLayout(stats_group)
@@ -214,11 +202,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         """Initialize the main window."""
         super().__init__()
-        
+
+        self._sample_load_worker = None
+
         self._setup_components()
         self._setup_ui()
         self._setup_connections()
         self._setup_update_timer()
+
+        # Load bundled OpenFOAM sample asynchronously so the window appears immediately.
+        QTimer.singleShot(0, self._load_default_sample_async)
     
     def _setup_components(self):
         """Initialize core components."""
@@ -380,6 +373,11 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.status_bar.addWidget(self.status_label, stretch=1)
         
+        self.coord_label = QLabel("X: -- Y: -- Z: --")
+        self.coord_label.setMinimumWidth(220)
+        self.coord_label.setStyleSheet("font-family: monospace; color: #aaa;")
+        self.status_bar.addPermanentWidget(self.coord_label)
+        
         self.fps_label = QLabel("FPS: --")
         self.status_bar.addPermanentWidget(self.fps_label)
     
@@ -399,6 +397,10 @@ class MainWindow(QMainWindow):
         load_action.setShortcut(QKeySequence.Open)
         load_action.triggered.connect(self._load_scene)
         file_menu.addAction(load_action)
+
+        load_wind_action = QAction("Load &OpenFOAM Wind...", self)
+        load_wind_action.triggered.connect(self._load_openfoam_wind)
+        file_menu.addAction(load_wind_action)
         
         file_menu.addSeparator()
         
@@ -434,12 +436,20 @@ class MainWindow(QMainWindow):
         # Object selection
         self.gl_widget.object_selected.connect(self._on_object_selected)
         
+        # Viewport hover coordinates
+        self.gl_widget.cursor_world_moved.connect(self._on_cursor_world_moved)
+        
         # Simulation updates
         self.sim_controller.simulation_updated.connect(self._on_simulation_update)
         
         # Control panel display toggles
         self.control_panel.grid_cb.toggled.connect(self._toggle_grid)
         self.control_panel.wind_cb.toggled.connect(self._toggle_wind)
+
+        # Redirect the ControlPanel reset button to the full reset handler so the
+        # Play button unchecks and the viewport repaints explicitly.
+        self.control_panel.reset_btn.clicked.disconnect()
+        self.control_panel.reset_btn.clicked.connect(self._reset_simulation)
     
     def _setup_update_timer(self):
         """Set up UI update timer."""
@@ -449,7 +459,18 @@ class MainWindow(QMainWindow):
     
     def _add_object(self, object_type: str, x: float, y: float, z: float):
         """Add an object to the scene."""
-        self.scene.add_object(object_type, (x, y, z))
+        mesh = self.scene.add_object(object_type, (x, y, z))
+        
+        # Get structural payload with pole center for ML parsing
+        payload = mesh.get_info_payload()
+        
+        # Log to console clearly
+        print(f"{payload['object_type']}, {payload['object_position']}, {payload['pole_center']}")
+        
+        # Make available to simulation/ML pipeline safely
+        if hasattr(self.sim_controller, 'register_object_payload'):
+            self.sim_controller.register_object_payload(payload)
+            
         self.object_library.update_object_count(len(self.scene.objects))
         self.status_label.setText(f"Added {object_type} at ({x:.1f}, {y:.1f}, {z:.1f})")
         self.gl_widget.update()
@@ -460,6 +481,14 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Selected: {obj.name}")
         else:
             self.status_label.setText("Ready")
+    
+    def _on_cursor_world_moved(self, x: float, y: float, z: float):
+        """Update the status bar with the cursor's world coordinates."""
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            self.coord_label.setText("X: -- Y: -- Z: --")
+            return
+        
+        self.coord_label.setText(f"X: {x:.1f} Y: {y:.1f} Z: {z:.1f}")
     
     def _on_simulation_update(self):
         """Handle simulation update."""
@@ -545,6 +574,125 @@ class MainWindow(QMainWindow):
             self.object_library.update_object_count(len(self.scene.objects))
             self.gl_widget.update()
             self.status_label.setText(f"Scene loaded from {filepath}")
+
+    def _load_default_sample_async(self):
+        """Kick off background load of the bundled OpenFOAM sample dataset."""
+        sample_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..",
+                "wind_data",
+                "sample_wind_data",
+            )
+        )
+        if not os.path.isdir(sample_path):
+            return  # No bundled sample; keep demo wind silently.
+
+        if self._sample_load_worker is not None and self._sample_load_worker.isRunning():
+            return
+
+        self.status_label.setText("Loading sample wind...")
+        self.control_panel.play_btn.setEnabled(False)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(False)
+
+        worker = _OpenFOAMLoadWorker(sample_path, self)
+        worker.finished_ok.connect(self._on_sample_load_finished)
+        worker.failed.connect(self._on_sample_load_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._sample_load_worker = worker
+        worker.start()
+
+    def _on_sample_load_finished(self, data, x_coords, y_coords, z_coords, time_coords):
+        """Apply parsed sample wind data on the UI thread."""
+        try:
+            self.wind_field.set_wind_data(data, x_coords, y_coords, z_coords, time_coords)
+            self.scene.reset_all_objects()
+            self._fit_grid_to_wind_field()
+            self.status_label.setText("OpenFOAM sample loaded")
+            self.gl_widget.update()
+        finally:
+            self.control_panel.play_btn.setEnabled(True)
+            if hasattr(self, "play_action"):
+                self.play_action.setEnabled(True)
+            self._sample_load_worker = None
+
+    def _on_sample_load_failed(self, message: str):
+        """Restore controls and surface the error in the status bar."""
+        self.status_label.setText(f"Sample load failed: {message}")
+        self.control_panel.play_btn.setEnabled(True)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(True)
+        self._sample_load_worker = None
+
+    def _load_openfoam_wind(self):
+        """Load OpenFOAM wind data from a folder."""
+        base_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select OpenFOAM surfaces folder",
+            ""
+        )
+
+        if not base_dir:
+            return
+
+        if self.sim_controller.is_running:
+            self.sim_controller.stop()
+            self.play_action.setChecked(False)
+            self.control_panel.play_btn.setChecked(False)
+
+        self.status_label.setText("Loading OpenFOAM wind data...")
+        self.status_bar.repaint()
+
+        try:
+            self.wind_field.load_from_openfoam_folder(base_dir)
+        except Exception as exc:
+            QMessageBox.critical(self, "OpenFOAM Load Failed", str(exc))
+            self.status_label.setText("Failed to load OpenFOAM wind data")
+            return
+
+        self.scene.reset_all_objects()
+        self._fit_grid_to_wind_field()
+        self.status_label.setText(f"OpenFOAM wind loaded from {base_dir}")
+        self.gl_widget.update()
+    
+    def _fit_grid_to_wind_field(self):
+        """Resize and center the ground grid around the loaded wind field (Z-up world)."""
+        min_corner, max_corner = self.wind_field.get_bounds()
+        min_x, max_x = float(min_corner[0]), float(max_corner[0])
+        min_y, max_y = float(min_corner[1]), float(max_corner[1])
+
+        spacing = self._infer_horizontal_grid_spacing()
+        center_x = (min_x + max_x) / 2.0
+        center_y = (min_y + max_y) / 2.0
+        half_extent = max((max_x - min_x) / 2.0, (max_y - min_y) / 2.0, spacing)
+        half_steps = max(1, int(math.ceil(half_extent / spacing)))
+
+        self.scene.grid_center = (center_x, center_y)
+        self.scene.grid_spacing = spacing
+        self.scene.grid_size = half_steps * 2
+
+    def _infer_horizontal_grid_spacing(self) -> float:
+        """Infer a display grid spacing from loaded wind X/Y coordinates."""
+        spacing_candidates = []
+
+        for coords in (self.wind_field.x_coords, self.wind_field.y_coords):
+            unique_coords = sorted({float(coord) for coord in coords})
+            diffs = [
+                b - a
+                for a, b in zip(unique_coords, unique_coords[1:])
+                if b - a > 1e-6
+            ]
+            
+            if diffs:
+                diffs.sort()
+                index = min(len(diffs) - 1, int(round((len(diffs) - 1) * 0.75)))
+                spacing_candidates.append(diffs[index])
+        
+        if not spacing_candidates:
+            return max(float(self.scene.grid_spacing), 1.0)
+        
+        return max(min(spacing_candidates), 1e-3)
     
     def _show_about(self):
         """Show about dialog."""

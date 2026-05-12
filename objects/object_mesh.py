@@ -31,7 +31,8 @@ class ObjectMesh:
         self,
         name: str,
         obj_path: Optional[str] = None,
-        position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        rest_lengths = None
     ):
         """
         Initialize the mesh object.
@@ -294,18 +295,34 @@ class ObjectMesh:
         
         self.vertices = np.array(vertices, dtype=np.float32)
         self.faces = np.array(faces, dtype=np.int32)
-        
-        if normals:
-            self.normals = np.array(normals, dtype=np.float32)
-        else:
-            self._compute_normals()
-        
-        if texture_coords:
-            self.texture_coords = np.array(texture_coords, dtype=np.float32)
-        
-        # Initialize current and previous vertices
+
+        normals_arr = np.array(normals, dtype=np.float32) if normals else None
+        texcoords_arr = np.array(texture_coords, dtype=np.float32) if texture_coords else None
+
+        # The bundled flag.obj is authored with x as the outer loop and z as the
+        # inner loop (stride 20), so the pole edge occupies indices 0..19 as one
+        # contiguous block. The pretrained MeshGraphNet, however, was trained on
+        # a row-major (H=20 rows along z, W=30 cols along x) layout with stride
+        # 30, where the pole edge is column 0 of each row (indices 0, 30, 60, …,
+        # 570) and topology_edge_index.npy / PIN_MASK assume that order. Without
+        # a remap the model's graph adjacency, pinned indices, and rest lengths
+        # are all wrong, which causes free vertices to drift. Re-index here.
+        if self.name.lower() == 'flag' and self.vertices.shape[0] == 600:
+            self.vertices, self.faces, normals_arr, texcoords_arr = self._remap_flag_to_trained_layout(
+                self.vertices, self.faces, normals_arr, texcoords_arr
+            )
+
+        # Initialize current and previous vertices before normal computation.
         self.current_vertices = self.vertices.copy()
         self.previous_vertices = self.vertices.copy()
+
+        if normals_arr is not None:
+            self.normals = normals_arr
+        else:
+            self._compute_normals()
+
+        if texcoords_arr is not None:
+            self.texture_coords = texcoords_arr
     
     def save_to_obj(self, filepath: str):
         """
@@ -329,6 +346,47 @@ class ObjectMesh:
             for face in self.faces:
                 f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
     
+    @staticmethod
+    def _remap_flag_to_trained_layout(vertices, faces, normals, texcoords):
+        """Permute flag vertices from (x_outer=30, z_inner=20) into the
+        trained row-major (z_outer=20, x_inner=30) layout.
+
+        After this, vertex indices [0, 30, 60, …, 570] coincide with the pole
+        edge (x=0 column), matching the pretrained model's PIN_MASK and
+        topology_edge_index.npy.
+        """
+        X_OUTER, Z_INNER = 30, 20
+        Z_OUTER, X_INNER = 20, 30
+
+        verts_grid = vertices.reshape(X_OUTER, Z_INNER, 3)
+        verts_remapped = verts_grid.transpose(1, 0, 2).reshape(-1, 3).astype(np.float32)
+
+        # Build old_idx -> new_idx permutation matching the same transpose.
+        old_to_new = np.arange(X_OUTER * Z_INNER).reshape(X_OUTER, Z_INNER) \
+                       .transpose(1, 0).reshape(-1)
+        # old_to_new[i] gives the NEW position of vertex i, so to re-index faces
+        # we need the lookup f(new) = old_to_new[old]; that's exactly this map.
+        remap = np.empty_like(old_to_new)
+        remap[old_to_new] = np.arange(old_to_new.size)
+        # remap[old_idx] tells us where that old vertex now lives in the new array.
+        faces_remapped = remap[faces].astype(np.int32)
+
+        normals_remapped = None
+        if normals is not None and normals.shape[0] == vertices.shape[0]:
+            normals_remapped = normals.reshape(X_OUTER, Z_INNER, 3) \
+                                       .transpose(1, 0, 2).reshape(-1, 3).astype(np.float32)
+        elif normals is not None:
+            normals_remapped = normals  # per-face or otherwise — leave alone
+
+        texcoords_remapped = None
+        if texcoords is not None and texcoords.shape[0] == vertices.shape[0]:
+            texcoords_remapped = texcoords.reshape(X_OUTER, Z_INNER, -1) \
+                                           .transpose(1, 0, 2).reshape(-1, texcoords.shape[-1]).astype(np.float32)
+        elif texcoords is not None:
+            texcoords_remapped = texcoords
+
+        return verts_remapped, faces_remapped, normals_remapped, texcoords_remapped
+
     def _compute_normals(self):
         """Compute vertex normals from face normals."""
         if len(self.vertices) == 0 or len(self.faces) == 0:
@@ -419,6 +477,46 @@ class ObjectMesh:
         """
         world_verts = self.get_world_vertices()
         return world_verts.mean(axis=0)
+
+    def get_pole_center(self) -> np.ndarray:
+        """
+        Compute and expose the pole center coordinates.
+        For flags, compute pole center from the flag's pole-attachment side (x-min side).
+        For other objects, return the full mesh center.
+        
+        Returns:
+            Pole center position (3,)
+        """
+        world_verts = self.get_world_vertices()
+        if len(world_verts) == 0:
+            return self.position.copy()
+            
+        if self.name.lower() == 'flag':
+            # Extract x-min side (pole attachment side)
+            min_x = world_verts[:, 0].min()
+            # Tolerance for finding vertices on the left edge
+            mask = np.abs(world_verts[:, 0] - min_x) < 0.1
+            left_edge = world_verts[mask]
+            
+            if len(left_edge) > 0:
+                return left_edge.mean(axis=0)
+                
+        # Default behavior: use the object's centroid
+        return self.get_center()
+
+    def get_info_payload(self) -> dict:
+        """
+        Return structured payload with object parameters (for ML parsing).
+        Includes object_type, object_position, and pole_center.
+        """
+        pole_center = self.get_pole_center()
+        
+        # Format as easily serializable tuples
+        return {
+            "object_type": self.name,
+            "object_position": tuple(float(v) for v in self.position),
+            "pole_center": tuple(float(v) for v in pole_center)
+        }
     
     def get_vertex_count(self) -> int:
         """Return the number of vertices."""
