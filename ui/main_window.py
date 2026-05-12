@@ -22,29 +22,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from renderer.scene import Scene
 from renderer.opengl_widget import OpenGLWidget
 from wind_data.wind_field import WindField
-from wind_data.openfoam_loader import extract_openfoam_wind
+from wind_data.openfoam_loader import extract_openfoam_case
+from objects.object_mesh import ObjectMesh
 from models.deformation_model import DeformationModel
 from ui.object_library import ObjectLibraryPanel
 from ui.simulation_controller import SimulationController
 
 
-class _OpenFOAMLoadWorker(QThread):
-    """Background thread that parses an OpenFOAM sample folder off the UI thread."""
+class _OpenFOAMCaseLoadWorker(QThread):
+    """Background thread that parses an OpenFOAM case folder off the UI thread."""
 
-    finished_ok = pyqtSignal(object, object, object, object, object)  # data, x, y, z, t
+    finished_ok = pyqtSignal(object)  # result dict from extract_openfoam_case
     failed = pyqtSignal(str)
 
-    def __init__(self, base_dir: str, parent=None):
+    def __init__(self, selected_path: str, parent=None):
         super().__init__(parent)
-        self._base_dir = base_dir
+        self._selected_path = selected_path
 
     def run(self):
         try:
-            data, x_coords, y_coords, z_coords, time_coords = extract_openfoam_wind(self._base_dir)
+            result = extract_openfoam_case(self._selected_path)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.finished_ok.emit(data, x_coords, y_coords, z_coords, time_coords)
+        self.finished_ok.emit(result)
 
 
 class ControlPanel(QWidget):
@@ -129,7 +130,12 @@ class ControlPanel(QWidget):
         self.wind_cb.setChecked(True)
         self.wind_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.wind_cb)
-        
+
+        self.env_cb = QCheckBox("Show Environment")
+        self.env_cb.setChecked(True)
+        self.env_cb.setStyleSheet("color: #ccc;")
+        display_layout.addWidget(self.env_cb)
+
         layout.addWidget(display_group)
 
         # Stats display
@@ -211,7 +217,7 @@ class MainWindow(QMainWindow):
         self._setup_update_timer()
 
         # Load bundled OpenFOAM sample asynchronously so the window appears immediately.
-        QTimer.singleShot(0, self._load_default_sample_async)
+        QTimer.singleShot(0, self._load_default_case_async)
     
     def _setup_components(self):
         """Initialize core components."""
@@ -398,9 +404,9 @@ class MainWindow(QMainWindow):
         load_action.triggered.connect(self._load_scene)
         file_menu.addAction(load_action)
 
-        load_wind_action = QAction("Load &OpenFOAM Wind...", self)
-        load_wind_action.triggered.connect(self._load_openfoam_wind)
-        file_menu.addAction(load_wind_action)
+        load_case_action = QAction("Load OpenFOAM &Output...", self)
+        load_case_action.triggered.connect(self._load_openfoam_case)
+        file_menu.addAction(load_case_action)
         
         file_menu.addSeparator()
         
@@ -445,6 +451,7 @@ class MainWindow(QMainWindow):
         # Control panel display toggles
         self.control_panel.grid_cb.toggled.connect(self._toggle_grid)
         self.control_panel.wind_cb.toggled.connect(self._toggle_wind)
+        self.control_panel.env_cb.toggled.connect(self._toggle_environment)
 
         # Redirect the ControlPanel reset button to the full reset handler so the
         # Play button unchecks and the viewport repaints explicitly.
@@ -521,6 +528,11 @@ class MainWindow(QMainWindow):
         """Toggle wind vector visibility."""
         self.scene.wind_vectors_visible = visible
         self.gl_widget.update()
+
+    def _toggle_environment(self, visible: bool):
+        """Toggle environment (static STL) mesh visibility."""
+        self.scene.environment_visible = visible
+        self.gl_widget.update()
     
     def _clear_scene(self):
         """Clear all objects from the scene."""
@@ -575,65 +587,30 @@ class MainWindow(QMainWindow):
             self.gl_widget.update()
             self.status_label.setText(f"Scene loaded from {filepath}")
 
-    def _load_default_sample_async(self):
-        """Kick off background load of the bundled OpenFOAM sample dataset."""
+    def _load_default_case_async(self):
+        """Kick off background load of the bundled OpenFOAM sample case."""
         sample_path = os.path.abspath(
             os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
                 "..",
                 "wind_data",
-                "sample_wind_data",
+                "sample_openfoam_output",
             )
         )
         if not os.path.isdir(sample_path):
             return  # No bundled sample; keep demo wind silently.
 
-        if self._sample_load_worker is not None and self._sample_load_worker.isRunning():
-            return
+        self._start_case_load(sample_path, source_label="bundled sample")
 
-        self.status_label.setText("Loading sample wind...")
-        self.control_panel.play_btn.setEnabled(False)
-        if hasattr(self, "play_action"):
-            self.play_action.setEnabled(False)
-
-        worker = _OpenFOAMLoadWorker(sample_path, self)
-        worker.finished_ok.connect(self._on_sample_load_finished)
-        worker.failed.connect(self._on_sample_load_failed)
-        worker.finished.connect(worker.deleteLater)
-        self._sample_load_worker = worker
-        worker.start()
-
-    def _on_sample_load_finished(self, data, x_coords, y_coords, z_coords, time_coords):
-        """Apply parsed sample wind data on the UI thread."""
-        try:
-            self.wind_field.set_wind_data(data, x_coords, y_coords, z_coords, time_coords)
-            self.scene.reset_all_objects()
-            self._fit_grid_to_wind_field()
-            self.status_label.setText("OpenFOAM sample loaded")
-            self.gl_widget.update()
-        finally:
-            self.control_panel.play_btn.setEnabled(True)
-            if hasattr(self, "play_action"):
-                self.play_action.setEnabled(True)
-            self._sample_load_worker = None
-
-    def _on_sample_load_failed(self, message: str):
-        """Restore controls and surface the error in the status bar."""
-        self.status_label.setText(f"Sample load failed: {message}")
-        self.control_panel.play_btn.setEnabled(True)
-        if hasattr(self, "play_action"):
-            self.play_action.setEnabled(True)
-        self._sample_load_worker = None
-
-    def _load_openfoam_wind(self):
-        """Load OpenFOAM wind data from a folder."""
-        base_dir = QFileDialog.getExistingDirectory(
+    def _load_openfoam_case(self):
+        """Load an OpenFOAM case (or surfaces folder) chosen by the user."""
+        selected = QFileDialog.getExistingDirectory(
             self,
-            "Select OpenFOAM surfaces folder",
+            "Select OpenFOAM case folder (or postProcessing/surfaces)",
             ""
         )
 
-        if not base_dir:
+        if not selected:
             return
 
         if self.sim_controller.is_running:
@@ -641,20 +618,91 @@ class MainWindow(QMainWindow):
             self.play_action.setChecked(False)
             self.control_panel.play_btn.setChecked(False)
 
-        self.status_label.setText("Loading OpenFOAM wind data...")
-        self.status_bar.repaint()
+        self._start_case_load(selected, source_label=selected)
 
-        try:
-            self.wind_field.load_from_openfoam_folder(base_dir)
-        except Exception as exc:
-            QMessageBox.critical(self, "OpenFOAM Load Failed", str(exc))
-            self.status_label.setText("Failed to load OpenFOAM wind data")
+    def _start_case_load(self, selected_path: str, source_label: str):
+        """Spawn a background worker that loads an OpenFOAM case."""
+        if self._sample_load_worker is not None and self._sample_load_worker.isRunning():
             return
 
+        self.status_label.setText(f"Loading OpenFOAM case ({source_label})...")
+        self.control_panel.play_btn.setEnabled(False)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(False)
+
+        worker = _OpenFOAMCaseLoadWorker(selected_path, self)
+        worker.finished_ok.connect(self._on_case_load_finished)
+        worker.failed.connect(self._on_case_load_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._sample_load_worker = worker
+        worker.start()
+
+    def _on_case_load_finished(self, result: dict):
+        """Apply a parsed OpenFOAM case on the UI thread."""
+        try:
+            self._apply_case_result(result)
+        finally:
+            self.control_panel.play_btn.setEnabled(True)
+            if hasattr(self, "play_action"):
+                self.play_action.setEnabled(True)
+            self._sample_load_worker = None
+
+    def _on_case_load_failed(self, message: str):
+        """Restore controls and surface the error in the status bar."""
+        self.status_label.setText(f"OpenFOAM case load failed: {message}")
+        self.control_panel.play_btn.setEnabled(True)
+        if hasattr(self, "play_action"):
+            self.play_action.setEnabled(True)
+        self._sample_load_worker = None
+
+    def _apply_case_result(self, result: dict):
+        """Apply wind + patches + triSurface geometry from a loaded case."""
+        wind_data, x_coords, y_coords, z_coords, time_coords = result["wind"]
+        self.wind_field.set_wind_data(wind_data, x_coords, y_coords, z_coords, time_coords)
         self.scene.reset_all_objects()
+
+        self.scene.clear_environment_meshes()
+        for tri in result.get("tri_surfaces", []):
+            mesh = ObjectMesh.from_arrays(
+                name=tri["name"],
+                vertices=tri["vertices"],
+                faces=tri["faces"],
+                normals=tri.get("normals"),
+            )
+            self.scene.add_environment_mesh(mesh)
+
         self._fit_grid_to_wind_field()
-        self.status_label.setText(f"OpenFOAM wind loaded from {base_dir}")
+        self.status_label.setText(self._format_case_status(result))
         self.gl_widget.update()
+
+    def _format_case_status(self, result: dict) -> str:
+        """Compose the status-bar summary for a loaded case."""
+        x_n = len(self.wind_field.x_coords)
+        y_n = len(self.wind_field.y_coords)
+        z_n = len(self.wind_field.z_coords)
+        t_n = self.wind_field.time_steps
+
+        parts = [f"Loaded OpenFOAM case: wind {x_n}×{y_n}×{z_n}, {t_n} steps"]
+
+        patches = result.get("patches") or []
+        if patches:
+            patch_str = ", ".join(f"{p['name']}({p['type']})" for p in patches)
+            parts.append(f"patches: {patch_str}")
+        else:
+            parts.append("patches: (boundary not found)")
+
+        tri_surfaces = result.get("tri_surfaces") or []
+        if tri_surfaces:
+            parts.append(f"env: {len(tri_surfaces)} mesh" + ("es" if len(tri_surfaces) != 1 else ""))
+        else:
+            parts.append("env: none")
+
+        text = "; ".join(parts)
+
+        warnings = result.get("warnings") or []
+        if warnings:
+            text += " (" + "; ".join(warnings) + ")"
+        return text
     
     def _fit_grid_to_wind_field(self):
         """Resize and center the ground grid around the loaded wind field (Z-up world)."""

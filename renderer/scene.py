@@ -177,13 +177,15 @@ class Scene:
             wind_field: Wind field instance (creates default if None)
         """
         self.objects: List[ObjectMesh] = []
+        self.environment_meshes: List[ObjectMesh] = []
         self.wind_field = wind_field or WindField()
         self.camera = Camera()
-        
+
         # Visibility settings
         self.grid_visible = True
         self.wind_vectors_visible = True
         self.ground_visible = True
+        self.environment_visible = True
         
         # Grid settings
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
@@ -337,6 +339,14 @@ class Scene:
         self.objects.clear()
         self._object_ids.clear()
         self.selected_object = None
+
+    def add_environment_mesh(self, mesh: ObjectMesh):
+        """Add a static, non-interactive mesh (e.g. STL building geometry)."""
+        self.environment_meshes.append(mesh)
+
+    def clear_environment_meshes(self):
+        """Remove all static environment meshes."""
+        self.environment_meshes.clear()
     
     def get_object_at_position(
         self,
