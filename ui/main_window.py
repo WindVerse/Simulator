@@ -481,6 +481,7 @@ class MainWindow(QMainWindow):
         self.object_library.update_object_count(len(self.scene.objects))
         self.status_label.setText(f"Added {object_type} at ({x:.1f}, {y:.1f}, {z:.1f})")
         self.gl_widget.update()
+        self.gl_widget.start_focus_on_object(mesh)
     
     def _on_object_selected(self, obj):
         """Handle object selection."""

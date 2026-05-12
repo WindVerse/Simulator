@@ -9,7 +9,7 @@ import sys
 import os
 
 from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
+from PyQt5.QtCore import Qt, QTimer, QElapsedTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QMouseEvent, QWheelEvent
 
 from OpenGL.GL import *
@@ -67,7 +67,13 @@ class OpenGLWidget(QOpenGLWidget):
         
         # Drop state
         self._pending_drop_type: Optional[str] = None
-        
+
+        # Camera focus animation
+        self._focus_anim_timer = QTimer(self)
+        self._focus_anim_timer.setInterval(16)  # ~60 FPS
+        self._focus_anim_timer.timeout.connect(self._on_focus_anim_tick)
+        self._focus_anim_elapsed = QElapsedTimer()
+
         # Rendering settings
         self._bg_color = (0.1, 0.1, 0.15, 1.0)
         self._grid_color = (0.3, 0.3, 0.35, 1.0)
@@ -540,14 +546,17 @@ class OpenGLWidget(QOpenGLWidget):
                     self.update()
         elif self._mouse_button == Qt.RightButton:
             # Orbit camera
+            self._cancel_focus_animation()
             self.scene.camera.orbit(dx * 0.5, -dy * 0.5)
             self.update()
         elif self._mouse_button == Qt.MiddleButton:
             # Pan camera
+            self._cancel_focus_animation()
             self.scene.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         elif self._mouse_button == Qt.LeftButton and not self._dragged_object:
             # Pan camera on left button click on empty grid
+            self._cancel_focus_animation()
             self.scene.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         
@@ -574,6 +583,7 @@ class OpenGLWidget(QOpenGLWidget):
     
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zoom."""
+        self._cancel_focus_animation()
         delta = event.angleDelta().y() / 120.0
         self.scene.camera.zoom(delta)
         self.update()
@@ -644,7 +654,34 @@ class OpenGLWidget(QOpenGLWidget):
         """Cancel any pending drop operation."""
         self._pending_drop_type = None
         self.setCursor(Qt.ArrowCursor)
-    
+
+    def start_focus_on_object(self, mesh: ObjectMesh):
+        """Begin a smooth camera dolly-in centered on the given mesh."""
+        if mesh is None:
+            return
+        center = mesh.get_center()
+        min_c, max_c = mesh.get_bounding_box()
+        radius = float(np.linalg.norm(max_c - min_c) * 0.5)
+        if not np.isfinite(radius) or radius <= 0.0:
+            radius = 1.0
+        self.scene.camera.focus_on(center, radius=radius)
+        self._focus_anim_elapsed.restart()
+        self._focus_anim_timer.start()
+
+    def _cancel_focus_animation(self):
+        """Cancel a running focus animation (no-op if not active)."""
+        if self._focus_anim_timer.isActive():
+            self._focus_anim_timer.stop()
+        self.scene.camera.cancel_focus_animation()
+
+    def _on_focus_anim_tick(self):
+        """Per-frame tick that advances the camera focus animation."""
+        dt = self._focus_anim_elapsed.restart() / 1000.0
+        still_animating = self.scene.camera.tick_focus_animation(dt)
+        self.update()
+        if not still_animating:
+            self._focus_anim_timer.stop()
+
     # Drag and drop support
     def dragEnterEvent(self, event):
         """Handle drag enter."""
