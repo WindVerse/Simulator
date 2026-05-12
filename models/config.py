@@ -143,6 +143,8 @@ WIND_DIR = os.path.join(DATASET_DIR, "winds")
 TARGET_DIR = os.path.join(DATASET_DIR, "targets", TARGET_TYPE)
 TOPOLOGY_PATH = os.path.join(os.path.dirname(__file__), "topology_edge_index.npy")
 FACES_PATH = os.path.join(DATASET_DIR, "topology", "topology_faces.npy")
+STD_ACC= os.path.join(os.path.dirname(__file__), "std_acc.npy")
+MEAN_ACC= os.path.join(os.path.dirname(__file__), "mean_acc.npy")
 
 #########################
 ## Pinning Mask Values ##

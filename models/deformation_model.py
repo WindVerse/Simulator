@@ -38,6 +38,8 @@ class DeformationModel:
         self.batch_pin_mask = cfg.PIN_MASK.to(self.device)
         self.pin_mask_bool = self.batch_pin_mask.squeeze(-1).bool()
         self.expected_num_vertices = cfg.NUM_VERTICES
+        self.std_acc = torch.tensor(np.load(cfg.STD_ACC), device=self.device, dtype=torch.float32).view(1, -1)
+        self.mean_acc = torch.tensor(np.load(cfg.MEAN_ACC), device=self.device, dtype=torch.float32).view(1, -1)
 
         # Strain projection (PBD) — clamp edges to within MAX_STRAIN × rest_length
         # after the unbounded model decoder, otherwise OOD wind can blow vertices
@@ -146,68 +148,73 @@ class DeformationModel:
             # ---- Inference ----
             # Encoder applies LayerNorm internally; decoder output is in physical units.
             pred = self.model(node_features, self.edge_index, edge_attr)
+            print(f"pred shape: {pred.shape}, pred sample: {pred[:5]}")
+            pred_real_acc = pred * self.std_acc + self.mean_acc
+            print(f"std_acc shape: {self.std_acc.shape}")
+            print(f"mean_acc shape: {self.mean_acc.shape}")
+            print(f"pred_real_acc shape: {pred_real_acc.shape}, sample: {pred_real_acc[:5]}")
 
             # ---- Enforce pinned-node boundary condition ----
             H, W = cfg.HEIGHT, cfg.WIDTH
             pinned_indices = [r * W for r in range(H)]
-            pred[pinned_indices, :] = 0.0
+            pred_real_acc[pinned_indices, :] = 0.0
 
             # ---- Physics integration ----
             kinematic_vel = (curr_pos - prev_pos) / cfg.DELTA_T
 
             if cfg.TARGET_TYPE in ("accelerations", "acc_new"):
-                next_pos, _ = self.integrate(curr_pos, kinematic_vel, pred, cfg.DELTA_T)
+                next_pos, _ = self.integrate(curr_pos, kinematic_vel, pred_real_acc, cfg.DELTA_T)
             elif cfg.TARGET_TYPE == "acc":
-                next_pos = (2 * curr_pos) - prev_pos + pred
+                next_pos = (2 * curr_pos) - prev_pos + pred_real_acc
             elif cfg.TARGET_TYPE == "displacements":
-                next_pos = curr_pos + pred
+                next_pos = curr_pos + pred_real_acc
             else:
                 raise ValueError(f"Unknown TARGET_TYPE in config: {cfg.TARGET_TYPE}")
 
             # Re-pin to be safe after integration
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+            # next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
 
-            # ---- Cap per-tick displacement ----
-            # The decoder is unbounded; under OOD wind a single forward pass can
-            # produce predictions that translate vertices by several metres in
-            # one tick. Clamp the per-tick movement of each free vertex to a
-            # fraction of the mean rest length so the mesh cannot blow up
-            # before the strain projection has a chance to act.
-            max_step = 0.5 * rest_lengths_t.mean()
-            step = next_pos - curr_pos
-            step_norm = torch.norm(step, dim=-1, keepdim=True).clamp_min(1e-8)
-            scale = torch.minimum(torch.ones_like(step_norm), max_step / step_norm)
-            next_pos = curr_pos + step * scale
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+            # # ---- Cap per-tick displacement ----
+            # # The decoder is unbounded; under OOD wind a single forward pass can
+            # # produce predictions that translate vertices by several metres in
+            # # one tick. Clamp the per-tick movement of each free vertex to a
+            # # fraction of the mean rest length so the mesh cannot blow up
+            # # before the strain projection has a chance to act.
+            # max_step = 0.5 * rest_lengths_t.mean()
+            # step = next_pos - curr_pos
+            # step_norm = torch.norm(step, dim=-1, keepdim=True).clamp_min(1e-8)
+            # scale = torch.minimum(torch.ones_like(step_norm), max_step / step_norm)
+            # next_pos = curr_pos + step * scale
+            # next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
 
-            # ---- XPBD-style edge-length projection ----
-            # The decoder is unbounded, so without this the mesh can drift
-            # arbitrarily under OOD wind. Project any over-stretched edges back
-            # to MAX_STRAIN × rest_length, splitting the correction between free
-            # endpoints. Pinned vertices stay fixed.
-            row, col = self.edge_index
-            max_len = rest_lengths_t * self.max_strain
-            free_mask = (~self.pin_mask_bool).float().unsqueeze(-1)
-            w_row = free_mask[row]
-            w_col = free_mask[col]
-            w_sum = (w_row + w_col).clamp_min(1.0)
+            # # ---- XPBD-style edge-length projection ----
+            # # The decoder is unbounded, so without this the mesh can drift
+            # # arbitrarily under OOD wind. Project any over-stretched edges back
+            # # to MAX_STRAIN × rest_length, splitting the correction between free
+            # # endpoints. Pinned vertices stay fixed.
+            # row, col = self.edge_index
+            # max_len = rest_lengths_t * self.max_strain
+            # free_mask = (~self.pin_mask_bool).float().unsqueeze(-1)
+            # w_row = free_mask[row]
+            # w_col = free_mask[col]
+            # w_sum = (w_row + w_col).clamp_min(1.0)
 
-            for _ in range(self.projection_iters):
-                delta = next_pos[row] - next_pos[col]
-                length = torch.norm(delta, dim=-1).clamp_min(1e-8)
-                excess = (length - max_len).clamp_min(0.0)
-                if excess.max() == 0:
-                    break
-                direction = delta / length.unsqueeze(-1)
-                # 0.5: edge_index is bidirectional, every undirected edge
-                # appears as both (i,j) and (j,i).
-                # inv_degree[v]: Jacobi damping — vertex v receives corrections
-                # from all its incident edges in the same pass, so divide by
-                # the vertex's degree to prevent overshoot.
-                correction = 0.5 * excess.unsqueeze(-1) * direction
-                next_pos.index_add_(0, row, -correction * (w_row / w_sum) * self.inv_degree[row])
-                next_pos.index_add_(0, col,  correction * (w_col / w_sum) * self.inv_degree[col])
+            # for _ in range(self.projection_iters):
+            #     delta = next_pos[row] - next_pos[col]
+            #     length = torch.norm(delta, dim=-1).clamp_min(1e-8)
+            #     excess = (length - max_len).clamp_min(0.0)
+            #     if excess.max() == 0:
+            #         break
+            #     direction = delta / length.unsqueeze(-1)
+            #     # 0.5: edge_index is bidirectional, every undirected edge
+            #     # appears as both (i,j) and (j,i).
+            #     # inv_degree[v]: Jacobi damping — vertex v receives corrections
+            #     # from all its incident edges in the same pass, so divide by
+            #     # the vertex's degree to prevent overshoot.
+            #     correction = 0.5 * excess.unsqueeze(-1) * direction
+            #     next_pos.index_add_(0, row, -correction * (w_row / w_sum) * self.inv_degree[row])
+            #     next_pos.index_add_(0, col,  correction * (w_col / w_sum) * self.inv_degree[col])
 
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+            # next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
 
             return next_pos.detach().cpu().numpy()
