@@ -157,122 +157,122 @@ class OpenGLWidget(QOpenGLWidget):
         )
     
     def _draw_ground(self):
-        """Draw the ground plane."""
+        """Draw the ground plane on Z=0 (Z-up world)."""
         glDisable(GL_LIGHTING)
-        
+
         half_size = self.scene.grid_size // 2 * self.scene.grid_spacing
-        center_x, center_z = self.scene.grid_center
-        
+        center_x, center_y = self.scene.grid_center
+
         glColor4f(0.15, 0.15, 0.18, 1.0)
         glBegin(GL_QUADS)
-        glVertex3f(center_x - half_size, -0.01, center_z - half_size)
-        glVertex3f(center_x + half_size, -0.01, center_z - half_size)
-        glVertex3f(center_x + half_size, -0.01, center_z + half_size)
-        glVertex3f(center_x - half_size, -0.01, center_z + half_size)
+        glVertex3f(center_x - half_size, center_y - half_size, -0.01)
+        glVertex3f(center_x + half_size, center_y - half_size, -0.01)
+        glVertex3f(center_x + half_size, center_y + half_size, -0.01)
+        glVertex3f(center_x - half_size, center_y + half_size, -0.01)
         glEnd()
-        
+
         glEnable(GL_LIGHTING)
-    
+
     def _draw_grid(self):
-        """Draw the ground grid with enhanced visuals."""
+        """Draw the ground grid on Z=0 (Z-up world)."""
         glDisable(GL_LIGHTING)
         glLineWidth(1.0)
-        
+
         half_size = self.scene.grid_size // 2
         spacing = self.scene.grid_spacing
-        center_x, center_z = self.scene.grid_center
+        center_x, center_y = self.scene.grid_center
         extent = half_size * spacing
-        
+
         glColor4f(*self._grid_color)
         glBegin(GL_LINES)
-        
-        # Draw grid lines
+
+        # Draw grid lines on the X/Y horizontal plane
         for i in range(-half_size, half_size + 1):
             x = center_x + i * spacing
-            z = center_z + i * spacing
-            
-            # X-parallel lines
-            glVertex3f(x, 0, center_z - extent)
-            glVertex3f(x, 0, center_z + extent)
-            
-            # Z-parallel lines
-            glVertex3f(center_x - extent, 0, z)
-            glVertex3f(center_x + extent, 0, z)
-        
+            y = center_y + i * spacing
+
+            # Lines parallel to Y at constant X
+            glVertex3f(x, center_y - extent, 0)
+            glVertex3f(x, center_y + extent, 0)
+
+            # Lines parallel to X at constant Y
+            glVertex3f(center_x - extent, y, 0)
+            glVertex3f(center_x + extent, y, 0)
+
         glEnd()
-        
+
         # Draw highlighted grid cell under cursor
         self._draw_hovered_grid_cell()
-        
+
         # Draw coordinate labels
         self._draw_grid_labels()
-        
+
         glEnable(GL_LIGHTING)
-    
+
     def _draw_hovered_grid_cell(self):
         """Draw a highlighted square for the grid cell under the cursor."""
         if self._hovered_grid_cell is None:
             return
-        
-        x, z = self._hovered_grid_cell
+
+        x, y = self._hovered_grid_cell
         half_spacing = self.scene.grid_spacing / 2.0
-        
+
         # Draw semi-transparent highlight quad
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        
+
         # Light blue highlight with transparency
         glColor4f(0.2, 0.6, 1.0, 0.2)
         glBegin(GL_QUADS)
-        glVertex3f(x - half_spacing, 0.001, z - half_spacing)
-        glVertex3f(x + half_spacing, 0.001, z - half_spacing)
-        glVertex3f(x + half_spacing, 0.001, z + half_spacing)
-        glVertex3f(x - half_spacing, 0.001, z + half_spacing)
+        glVertex3f(x - half_spacing, y - half_spacing, 0.001)
+        glVertex3f(x + half_spacing, y - half_spacing, 0.001)
+        glVertex3f(x + half_spacing, y + half_spacing, 0.001)
+        glVertex3f(x - half_spacing, y + half_spacing, 0.001)
         glEnd()
-        
+
         # Draw outline
         glLineWidth(2.0)
         glColor4f(0.2, 0.8, 1.0, 0.8)
         glBegin(GL_LINE_LOOP)
-        glVertex3f(x - half_spacing, 0.002, z - half_spacing)
-        glVertex3f(x + half_spacing, 0.002, z - half_spacing)
-        glVertex3f(x + half_spacing, 0.002, z + half_spacing)
-        glVertex3f(x - half_spacing, 0.002, z + half_spacing)
+        glVertex3f(x - half_spacing, y - half_spacing, 0.002)
+        glVertex3f(x + half_spacing, y - half_spacing, 0.002)
+        glVertex3f(x + half_spacing, y + half_spacing, 0.002)
+        glVertex3f(x - half_spacing, y + half_spacing, 0.002)
         glEnd()
-        
+
         glEnable(GL_DEPTH_TEST)
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-    
+
     def _draw_grid_labels(self):
-        """Draw X and Z coordinate labels on the grid."""
+        """Draw X and Y axis ticks at the edge of the ground grid."""
         half_size = self.scene.grid_size // 2
         spacing = self.scene.grid_spacing
-        center_x, center_z = self.scene.grid_center
+        center_x, center_y = self.scene.grid_center
         extent = half_size * spacing
-        
+
         glDisable(GL_LIGHTING)
         glLineWidth(1.0)
         glColor4f(0.5, 0.5, 0.5, 0.8)
-        
+
         # Draw axis labels every 10 meters
         label_interval = 10
         for i in range(-half_size, half_size + 1, label_interval // int(spacing)):
             x = center_x + i * spacing
-            z = center_z + i * spacing
-            
-            # X-axis marker
+            y = center_y + i * spacing
+
+            # X-axis tick (along the -Y edge)
             if abs(i * spacing) < extent + 1:
                 glBegin(GL_LINES)
-                glVertex3f(x, 0, center_z - extent - 1)
-                glVertex3f(x, 0, center_z - extent - 0.5)
+                glVertex3f(x, center_y - extent - 1, 0)
+                glVertex3f(x, center_y - extent - 0.5, 0)
                 glEnd()
-            
-            # Z-axis marker
+
+            # Y-axis tick (along the -X edge)
             if abs(i * spacing) < extent + 1:
                 glBegin(GL_LINES)
-                glVertex3f(center_x - extent - 1, 0, z)
-                glVertex3f(center_x - extent - 0.5, 0, z)
+                glVertex3f(center_x - extent - 1, y, 0)
+                glVertex3f(center_x - extent - 0.5, y, 0)
                 glEnd()
     
     def _draw_wind_vectors(self):
@@ -332,10 +332,9 @@ class OpenGLWidget(QOpenGLWidget):
         """
         glPushMatrix()
         
-        # Apply object transform
+        # Apply object transform.
+        # flag.obj is authored Z-up (pole along X, height along Z) — no rotation needed.
         glTranslatef(*mesh.position)
-        if mesh.name.lower() == "flag":
-            glRotatef(-90.0, 1.0, 0.0, 0.0)
         glScalef(mesh.scale, mesh.scale, mesh.scale)
         
         # Set color with glow effect for selected objects
@@ -487,8 +486,11 @@ class OpenGLWidget(QOpenGLWidget):
         
         # Handle object drag completion
         if self._dragged_object and event.button() == Qt.LeftButton:
-            # Snap dragged object to grid
+            # Snap dragged object's X/Y to grid; preserve Z if lifted off the ground
+            current_z = float(self._dragged_object.position[2])
             snapped_pos = self.scene.snap_to_grid(self._dragged_object.position)
+            if current_z > 1e-4:
+                snapped_pos[2] = current_z
             self.scene.move_object(self._dragged_object, snapped_pos)
             
             # Emit signal that object was moved
@@ -516,13 +518,22 @@ class OpenGLWidget(QOpenGLWidget):
         
         # Handle object dragging
         if self._dragged_object and self._mouse_button == Qt.LeftButton:
-            world_pos = self._screen_to_world_current(event.x(), event.y())
-            if world_pos is not None:
-                # Move object with offset
-                new_pos = world_pos + self._drag_offset
-                new_pos[1] = 0  # Keep at ground level
-                self.scene.move_object(self._dragged_object, new_pos)
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            if shift_held:
+                # Lift mode: lock X/Y, drive Z by vertical mouse delta (mouse up = lift)
+                lift_speed = 0.05
+                current = self._dragged_object.position.copy()
+                current[2] = max(0.0, float(current[2]) - dy * lift_speed)
+                self.scene.move_object(self._dragged_object, current)
                 self.update()
+            else:
+                world_pos = self._screen_to_world_current(event.x(), event.y())
+                if world_pos is not None:
+                    # Move object with offset, keep on ground (Z-up world)
+                    new_pos = world_pos + self._drag_offset
+                    new_pos[2] = 0
+                    self.scene.move_object(self._dragged_object, new_pos)
+                    self.update()
         elif self._mouse_button == Qt.RightButton:
             # Orbit camera
             self.scene.camera.orbit(dx * 0.5, -dy * 0.5)
@@ -547,9 +558,9 @@ class OpenGLWidget(QOpenGLWidget):
             self._hovered_grid_cell = None
             return
         
-        # Track hovered grid cell for visualization
+        # Track hovered grid cell for visualization (X/Y horizontal plane)
         snapped = self.scene.snap_to_grid(world_pos)
-        self._hovered_grid_cell = (float(snapped[0]), float(snapped[2]))
+        self._hovered_grid_cell = (float(snapped[0]), float(snapped[1]))
         
         self.cursor_world_moved.emit(
             float(world_pos[0]),
@@ -594,14 +605,14 @@ class OpenGLWidget(QOpenGLWidget):
         ray_dir = np.array(far_point) - np.array(near_point)
         ray_origin = np.array(near_point)
         
-        # Intersect with ground plane (y = 0)
-        if abs(ray_dir[1]) < 1e-6:
+        # Intersect with ground plane (z = 0, Z-up world)
+        if abs(ray_dir[2]) < 1e-6:
             return None
-        
-        t = -ray_origin[1] / ray_dir[1]
+
+        t = -ray_origin[2] / ray_dir[2]
         if t < 0:
             return None
-        
+
         intersection = ray_origin + t * ray_dir
         return intersection.astype(np.float32)
     
