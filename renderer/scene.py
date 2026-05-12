@@ -272,7 +272,13 @@ class Scene:
         self.wind_vectors_visible = True
         self.ground_visible = True
         self.environment_visible = True
-        
+
+        # Wind vector display
+        self.wind_display_mode = "resultant"   # "resultant" or "components"
+        self.wind_downsample_stride = 1        # 1 = show every vector
+        self.wind_vector_scale = 0.3           # auto-recomputed after data load
+        self.wind_color_by_speed = True        # apply Beaufort colormap in resultant mode
+
         # Grid settings
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = 1.0
@@ -556,6 +562,40 @@ class Scene:
     def toggle_wind_vectors(self):
         """Toggle wind vector visibility."""
         self.wind_vectors_visible = not self.wind_vectors_visible
+
+    def compute_wind_vector_scale(self) -> float:
+        """Auto-scale arrows so the strongest gust fits inside one grid cell.
+
+        Picks a scale s such that max(|v|) * s ≈ 0.8 * min(dx, dy, dz),
+        where dx/dy/dz are the median spacings of the wind grid axes.
+        Falls back to a default when data is empty or constant.
+        """
+        wf = self.wind_field
+        data = wf.data
+        if data.size == 0:
+            self.wind_vector_scale = 0.3
+            return self.wind_vector_scale
+
+        magnitudes = np.sqrt(np.sum(data * data, axis=0))
+        max_mag = float(magnitudes.max())
+        if not np.isfinite(max_mag) or max_mag < 1e-6:
+            self.wind_vector_scale = 0.3
+            return self.wind_vector_scale
+
+        def _axis_step(coords: np.ndarray) -> float:
+            if coords.size < 2:
+                return 1.0
+            diffs = np.diff(np.sort(coords.astype(np.float64)))
+            diffs = diffs[diffs > 1e-9]
+            return float(np.median(diffs)) if diffs.size else 1.0
+
+        dx = _axis_step(wf.x_coords)
+        dy = _axis_step(wf.y_coords)
+        dz = _axis_step(wf.z_coords)
+        cell = min(dx, dy, dz)
+
+        self.wind_vector_scale = 0.8 * cell / max_mag
+        return self.wind_vector_scale
     
     def reset_all_objects(self):
         """Reset all objects to their original state."""
