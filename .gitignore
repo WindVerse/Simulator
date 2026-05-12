@@ -24,4 +24,4 @@ Thumbs.db
 *.sqlite
 
 #sample wind data files
-sample_wind_data/
+#sample_wind_data/
