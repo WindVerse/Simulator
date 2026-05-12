@@ -242,7 +242,7 @@ class OpenGLWidget(QOpenGLWidget):
         glEnd()
 
         glEnable(GL_DEPTH_TEST)
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
     def _draw_grid_labels(self):
         """Draw X and Y axis ticks at the edge of the ground grid."""
@@ -321,6 +321,10 @@ class OpenGLWidget(QOpenGLWidget):
         for obj in self.scene.objects:
             is_selected = obj is self.scene.selected_object
             self._draw_mesh(obj, is_selected)
+
+        if getattr(self.scene, "environment_visible", True):
+            for env_mesh in getattr(self.scene, "environment_meshes", ()):
+                self._draw_mesh(env_mesh, selected=False)
     
     def _draw_mesh(self, mesh: ObjectMesh, selected: bool = False):
         """

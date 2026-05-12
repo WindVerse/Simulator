@@ -1,0 +1,1 @@
+wind_data/sample_openfoam_output/** filter=lfs diff=lfs merge=lfs -text
