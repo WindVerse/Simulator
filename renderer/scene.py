@@ -16,34 +16,53 @@ from objects.object_mesh import ObjectMesh
 from wind_data.wind_field import WindField
 
 
+_DEFAULT_TARGET = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+_DEFAULT_DISTANCE = 15.0
+_DEFAULT_AZIMUTH = 45.0
+_DEFAULT_ELEVATION = 30.0
+
+
 class Camera:
     """
     Camera for 3D scene viewing.
-    
+
     Supports orbit, pan, and zoom controls.
     """
-    
+
     def __init__(self):
         """Initialize camera with default values."""
         self.position = np.array([10.0, 10.0, 10.0], dtype=np.float32)
-        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+        self.target = _DEFAULT_TARGET.copy()
         self.up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        
+
         # Orbit parameters
-        self.distance = 15.0
-        self.azimuth = 45.0  # Horizontal angle in degrees
-        self.elevation = 30.0  # Vertical angle in degrees
-        
+        self.distance = _DEFAULT_DISTANCE
+        self.azimuth = _DEFAULT_AZIMUTH  # Horizontal angle in degrees
+        self.elevation = _DEFAULT_ELEVATION  # Vertical angle in degrees
+
         # Zoom limits for ±50m grid viewing
         self.zoom_min = 0.2  # Allow very close zoom (0.2m minimum)
         self.zoom_max = 200.0  # Allow very far zoom (200m maximum)
-        
+
         # Projection parameters
         self.fov = 60.0
         self.near = 0.01  # Reduced from 0.1 for closer near plane
         self.far = 1000.0
         self.aspect = 1.0
-        
+
+        # Focus-animation state
+        self._anim_active = False
+        self._anim_t = 0.0
+        self._anim_duration = 0.45
+        self._anim_start_target = self.target.copy()
+        self._anim_end_target = self.target.copy()
+        self._anim_start_distance = self.distance
+        self._anim_end_distance = self.distance
+        self._anim_start_azimuth = self.azimuth
+        self._anim_end_azimuth = self.azimuth
+        self._anim_start_elevation = self.elevation
+        self._anim_end_elevation = self.elevation
+
         self._update_position()
     
     def _update_position(self):
@@ -150,11 +169,78 @@ class Camera:
     
     def reset(self):
         """Reset camera to default position."""
-        self.distance = 15.0
-        self.azimuth = 45.0
-        self.elevation = 30.0
-        self.target = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+        self.distance = _DEFAULT_DISTANCE
+        self.azimuth = _DEFAULT_AZIMUTH
+        self.elevation = _DEFAULT_ELEVATION
+        self.target = _DEFAULT_TARGET.copy()
+        self._anim_active = False
         self._update_position()
+
+    def focus_on(self, target_world: np.ndarray, radius: float = 1.5, duration: float = 0.45):
+        """
+        Begin a smooth animated focus on a world-space point.
+
+        Args:
+            target_world: World position to center on (3,)
+            radius: Approximate object radius used to pick a framing distance
+            duration: Animation duration in seconds
+        """
+        target_world = np.asarray(target_world, dtype=np.float32).reshape(3)
+
+        fov_rad = np.radians(self.fov)
+        end_distance = max(2.5, float(radius) * 2.5 / np.tan(fov_rad / 2.0))
+        end_distance = float(np.clip(end_distance, self.zoom_min, self.zoom_max))
+
+        # Snapshot current state
+        self._anim_start_target = self.target.copy()
+        self._anim_start_distance = float(self.distance)
+        self._anim_start_azimuth = float(self.azimuth)
+        self._anim_start_elevation = float(self.elevation)
+
+        # End state — standard inspect angle (matches reset())
+        self._anim_end_target = target_world.copy()
+        self._anim_end_distance = end_distance
+
+        # Azimuth shortest-arc: pick end angle within ±180° of start
+        end_az = _DEFAULT_AZIMUTH
+        delta = ((end_az - self._anim_start_azimuth) + 180.0) % 360.0 - 180.0
+        self._anim_end_azimuth = self._anim_start_azimuth + delta
+        self._anim_end_elevation = _DEFAULT_ELEVATION
+
+        self._anim_duration = max(0.05, float(duration))
+        self._anim_t = 0.0
+        self._anim_active = True
+
+    def tick_focus_animation(self, dt_seconds: float) -> bool:
+        """
+        Advance the focus animation by dt_seconds.
+
+        Returns:
+            True while still animating, False once finished (or inactive).
+        """
+        if not self._anim_active:
+            return False
+
+        self._anim_t = min(1.0, self._anim_t + float(dt_seconds) / self._anim_duration)
+        # Ease-out cubic
+        t = self._anim_t
+        e = 1.0 - (1.0 - t) ** 3
+
+        self.target = self._anim_start_target + (self._anim_end_target - self._anim_start_target) * e
+        self.distance = self._anim_start_distance + (self._anim_end_distance - self._anim_start_distance) * e
+        self.azimuth = self._anim_start_azimuth + (self._anim_end_azimuth - self._anim_start_azimuth) * e
+        self.elevation = self._anim_start_elevation + (self._anim_end_elevation - self._anim_start_elevation) * e
+
+        self._update_position()
+
+        if self._anim_t >= 1.0:
+            self._anim_active = False
+            return False
+        return True
+
+    def cancel_focus_animation(self):
+        """Stop the focus animation, leaving the camera at its current interpolated state."""
+        self._anim_active = False
 
 
 class Scene:
@@ -186,7 +272,13 @@ class Scene:
         self.wind_vectors_visible = True
         self.ground_visible = True
         self.environment_visible = True
-        
+
+        # Wind vector display
+        self.wind_display_mode = "resultant"   # "resultant" or "components"
+        self.wind_downsample_stride = 1        # 1 = show every vector
+        self.wind_vector_scale = 0.3           # auto-recomputed after data load
+        self.wind_color_by_speed = True        # apply Beaufort colormap in resultant mode
+
         # Grid settings
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = 1.0
@@ -470,6 +562,40 @@ class Scene:
     def toggle_wind_vectors(self):
         """Toggle wind vector visibility."""
         self.wind_vectors_visible = not self.wind_vectors_visible
+
+    def compute_wind_vector_scale(self) -> float:
+        """Auto-scale arrows so the strongest gust fits inside one grid cell.
+
+        Picks a scale s such that max(|v|) * s ≈ 0.8 * min(dx, dy, dz),
+        where dx/dy/dz are the median spacings of the wind grid axes.
+        Falls back to a default when data is empty or constant.
+        """
+        wf = self.wind_field
+        data = wf.data
+        if data.size == 0:
+            self.wind_vector_scale = 0.3
+            return self.wind_vector_scale
+
+        magnitudes = np.sqrt(np.sum(data * data, axis=0))
+        max_mag = float(magnitudes.max())
+        if not np.isfinite(max_mag) or max_mag < 1e-6:
+            self.wind_vector_scale = 0.3
+            return self.wind_vector_scale
+
+        def _axis_step(coords: np.ndarray) -> float:
+            if coords.size < 2:
+                return 1.0
+            diffs = np.diff(np.sort(coords.astype(np.float64)))
+            diffs = diffs[diffs > 1e-9]
+            return float(np.median(diffs)) if diffs.size else 1.0
+
+        dx = _axis_step(wf.x_coords)
+        dy = _axis_step(wf.y_coords)
+        dz = _axis_step(wf.z_coords)
+        cell = min(dx, dy, dz)
+
+        self.wind_vector_scale = 0.8 * cell / max_mag
+        return self.wind_vector_scale
     
     def reset_all_objects(self):
         """Reset all objects to their original state."""

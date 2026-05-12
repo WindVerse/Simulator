@@ -57,6 +57,7 @@ class WindField:
         self.grid_spacing = grid_spacing
         self.origin = np.array(origin, dtype=np.float32)
         self.current_time = 0
+        self._grid_points_cache: Optional[np.ndarray] = None
 
         self._set_default_coords()
 
@@ -80,6 +81,7 @@ class WindField:
             self.origin[2] + np.arange(self.grid_size[2]) * self.grid_spacing
         ).astype(np.float32)
         self.time_coords = np.arange(self.time_steps, dtype=np.float32)
+        self._grid_points_cache = None
 
     def _generate_default_wind(self):
         """
@@ -130,6 +132,7 @@ class WindField:
         )
         self.time_steps = len(self.time_coords)
         self.current_time = 0
+        self._grid_points_cache = None
 
     def load_from_openfoam_folder(self, base_dir: str):
         """
@@ -187,6 +190,7 @@ class WindField:
             self.time_coords = np.arange(self.time_steps, dtype=np.float32)
 
         self.current_time = 0
+        self._grid_points_cache = None
 
     def save_to_file(self, filepath: str):
         """
@@ -306,10 +310,18 @@ class WindField:
 
         Returns:
             Array of shape (N, 3) with grid point positions
+
+        Cached: rebuilt only when the underlying coordinate arrays change
+        (set_wind_data / load_from_file / _set_default_coords reset the cache).
+        Callers must treat the returned array as read-only.
         """
-        X, Y, Z = np.meshgrid(self.x_coords, self.y_coords, self.z_coords, indexing='ij')
-        points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
-        return points.astype(np.float32)
+        if self._grid_points_cache is None:
+            X, Y, Z = np.meshgrid(
+                self.x_coords, self.y_coords, self.z_coords, indexing='ij'
+            )
+            points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+            self._grid_points_cache = np.ascontiguousarray(points, dtype=np.float32)
+        return self._grid_points_cache
 
     def get_current_velocities(self) -> np.ndarray:
         """

@@ -7,7 +7,8 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QToolBar, QAction, QStatusBar, QLabel,
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
-    QFrame, QGroupBox, QCheckBox, QPushButton
+    QFrame, QGroupBox, QCheckBox, QPushButton,
+    QRadioButton, QButtonGroup, QSpinBox
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
 from renderer.opengl_widget import OpenGLWidget
+from renderer.wind_colormap import BEAUFORT_BANDS
 from wind_data.wind_field import WindField
 from wind_data.openfoam_loader import extract_openfoam_case
 from objects.object_mesh import ObjectMesh
@@ -131,12 +133,72 @@ class ControlPanel(QWidget):
         self.wind_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.wind_cb)
 
+        # Wind display mode: resultant vs. per-component arrows
+        self.wind_mode_resultant_rb = QRadioButton("Resultant")
+        self.wind_mode_resultant_rb.setChecked(True)
+        self.wind_mode_resultant_rb.setStyleSheet("color: #ccc;")
+        self.wind_mode_components_rb = QRadioButton("Components (X/Y/Z)")
+        self.wind_mode_components_rb.setStyleSheet("color: #ccc;")
+        self.wind_mode_group = QButtonGroup(self)
+        self.wind_mode_group.addButton(self.wind_mode_resultant_rb)
+        self.wind_mode_group.addButton(self.wind_mode_components_rb)
+        display_layout.addWidget(self.wind_mode_resultant_rb)
+        display_layout.addWidget(self.wind_mode_components_rb)
+
+        # Downsample stride: 1 = show every vector.
+        stride_row = QHBoxLayout()
+        stride_label = QLabel("Stride:")
+        stride_label.setStyleSheet("color: #ccc;")
+        stride_row.addWidget(stride_label)
+        self.wind_stride_spin = QSpinBox()
+        self.wind_stride_spin.setRange(1, 50)
+        self.wind_stride_spin.setValue(1)
+        self.wind_stride_spin.setToolTip(
+            "1 = show every wind vector. Higher values skip points for performance."
+        )
+        stride_row.addWidget(self.wind_stride_spin)
+        stride_row.addStretch()
+        display_layout.addLayout(stride_row)
+
+        # Apply the Beaufort colormap (resultant mode only).
+        self.wind_color_cb = QCheckBox("Color by speed")
+        self.wind_color_cb.setChecked(True)
+        self.wind_color_cb.setStyleSheet("color: #ccc;")
+        self.wind_color_cb.setToolTip(
+            "Color arrows by wind speed (Beaufort bands). Resultant mode only."
+        )
+        display_layout.addWidget(self.wind_color_cb)
+
         self.env_cb = QCheckBox("Show Environment")
         self.env_cb.setChecked(True)
         self.env_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.env_cb)
 
         layout.addWidget(display_group)
+
+        # Wind speed legend (Beaufort scale).
+        legend_group = QGroupBox("Wind speed (Beaufort)")
+        legend_layout = QVBoxLayout(legend_group)
+        legend_layout.setContentsMargins(8, 8, 8, 8)
+        legend_layout.setSpacing(3)
+        for _max_speed, rgba, label, range_text in BEAUFORT_BANDS:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            swatch = QFrame()
+            swatch.setFixedSize(20, 12)
+            r, g, b, _a = rgba
+            swatch.setStyleSheet(
+                f"background-color: rgb({int(r*255)}, {int(g*255)}, {int(b*255)});"
+                f" border: 1px solid #444;"
+            )
+            text = QLabel(f"{range_text}  {label}")
+            text.setStyleSheet("color: #ccc; font-family: monospace; font-size: 11px;")
+            row.addWidget(swatch)
+            row.addWidget(text)
+            row.addStretch()
+            legend_layout.addLayout(row)
+        self.legend_group = legend_group
+        layout.addWidget(legend_group)
 
         # Stats display
         stats_group = QGroupBox("Statistics")
@@ -229,7 +291,8 @@ class MainWindow(QMainWindow):
         
         # Create scene
         self.scene = Scene(self.wind_field)
-        
+        self.scene.compute_wind_vector_scale()
+
         # Create deformation model
         self.deformation_model = DeformationModel()
         
@@ -452,6 +515,10 @@ class MainWindow(QMainWindow):
         self.control_panel.grid_cb.toggled.connect(self._toggle_grid)
         self.control_panel.wind_cb.toggled.connect(self._toggle_wind)
         self.control_panel.env_cb.toggled.connect(self._toggle_environment)
+        self.control_panel.wind_mode_resultant_rb.toggled.connect(self._on_wind_mode_changed)
+        self.control_panel.wind_stride_spin.valueChanged.connect(self._on_wind_stride_changed)
+        self.control_panel.wind_color_cb.toggled.connect(self._on_wind_color_changed)
+        self._refresh_legend_state()
 
         # Redirect the ControlPanel reset button to the full reset handler so the
         # Play button unchecks and the viewport repaints explicitly.
@@ -481,6 +548,7 @@ class MainWindow(QMainWindow):
         self.object_library.update_object_count(len(self.scene.objects))
         self.status_label.setText(f"Added {object_type} at ({x:.1f}, {y:.1f}, {z:.1f})")
         self.gl_widget.update()
+        self.gl_widget.start_focus_on_object(mesh)
     
     def _on_object_selected(self, obj):
         """Handle object selection."""
@@ -528,6 +596,34 @@ class MainWindow(QMainWindow):
         """Toggle wind vector visibility."""
         self.scene.wind_vectors_visible = visible
         self.gl_widget.update()
+
+    def _on_wind_mode_changed(self, _checked: bool):
+        """Switch between resultant and component vector rendering."""
+        self.scene.wind_display_mode = (
+            "resultant" if self.control_panel.wind_mode_resultant_rb.isChecked()
+            else "components"
+        )
+        self._refresh_legend_state()
+        self.gl_widget.update()
+
+    def _on_wind_stride_changed(self, value: int):
+        """Update wind vector downsampling stride."""
+        self.scene.wind_downsample_stride = max(1, int(value))
+        self.gl_widget.update()
+
+    def _on_wind_color_changed(self, checked: bool):
+        """Toggle the Beaufort speed colormap for resultant arrows."""
+        self.scene.wind_color_by_speed = bool(checked)
+        self._refresh_legend_state()
+        self.gl_widget.update()
+
+    def _refresh_legend_state(self):
+        """Gray out the legend when the colormap isn't actually applied."""
+        in_use = (
+            self.scene.wind_display_mode == "resultant"
+            and self.scene.wind_color_by_speed
+        )
+        self.control_panel.legend_group.setEnabled(in_use)
 
     def _toggle_environment(self, visible: bool):
         """Toggle environment (static STL) mesh visibility."""
@@ -659,6 +755,7 @@ class MainWindow(QMainWindow):
         """Apply wind + patches + triSurface geometry from a loaded case."""
         wind_data, x_coords, y_coords, z_coords, time_coords = result["wind"]
         self.wind_field.set_wind_data(wind_data, x_coords, y_coords, z_coords, time_coords)
+        self.scene.compute_wind_vector_scale()
         self.scene.reset_all_objects()
 
         self.scene.clear_environment_meshes()
