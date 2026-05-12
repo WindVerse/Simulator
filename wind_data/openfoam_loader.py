@@ -1,6 +1,8 @@
 """
 OpenFOAM wind data loader.
-Extracts wind data from postProcessing/surfaces output into a 5D array.
+Extracts wind data from postProcessing/surfaces output into a 5D array,
+plus higher-level helpers for parsing a full OpenFOAM case (boundary
+patches, triSurface STL geometry).
 
 Data layout: (component, z, y, x, time). OpenFOAM is Z-up and the simulator
 world is also Z-up, so coordinates and velocity components are passed through
@@ -8,15 +10,17 @@ without remapping.
 """
 
 from collections import deque
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 import os
 import re
+import struct
 
 import numpy as np
 
 
 _TIME_DIR_RE = re.compile(r"^\d+(?:\.\d+)?$")
 _Z_FILE_RE = re.compile(r"^U_zNormal_(\d+)\.raw$")
+_SURFACES_SUBPATH = os.path.join("postProcessing", "surfaces")
 
 
 def _list_time_dirs(base_dir: str) -> Tuple[List[str], np.ndarray]:
@@ -191,3 +195,265 @@ def extract_openfoam_wind(base_dir: str) -> Tuple[np.ndarray, np.ndarray, np.nda
         z_coords.astype(np.float32),
         time_coords
     )
+
+
+def _looks_like_surfaces_dir(path: str) -> bool:
+    """Return True if `path` looks like a postProcessing/surfaces folder."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return False
+    for name in entries:
+        if not _TIME_DIR_RE.match(name):
+            continue
+        time_path = os.path.join(path, name)
+        if not os.path.isdir(time_path):
+            continue
+        try:
+            for fname in os.listdir(time_path):
+                if _Z_FILE_RE.match(fname):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _resolve_surfaces_dir(selected_path: str) -> Tuple[str, Optional[str]]:
+    """Resolve the selected folder to (surfaces_dir, case_root_or_None).
+
+    Accepts either an OpenFOAM case root (containing postProcessing/surfaces)
+    or a surfaces folder directly.
+    """
+    selected_path = os.path.abspath(selected_path)
+    if _looks_like_surfaces_dir(selected_path):
+        return selected_path, None
+
+    candidate = os.path.join(selected_path, _SURFACES_SUBPATH)
+    if _looks_like_surfaces_dir(candidate):
+        return candidate, selected_path
+
+    raise FileNotFoundError(
+        f"No OpenFOAM surfaces (postProcessing/surfaces with U_zNormal_*.raw) "
+        f"found at or below: {selected_path}"
+    )
+
+
+_COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_COMMENT_LINE_RE = re.compile(r"//[^\n]*")
+_PATCH_BLOCK_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*\{([^{}]*)\}",
+    re.DOTALL,
+)
+_TYPE_FIELD_RE = re.compile(r"\btype\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+
+def parse_boundary_file(boundary_path: str) -> List[Dict[str, str]]:
+    """Parse an OpenFOAM constant/polyMesh/boundary dictionary.
+
+    Returns a list of {"name": str, "type": str} in file order.
+    """
+    with open(boundary_path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+
+    text = _COMMENT_BLOCK_RE.sub(" ", text)
+    text = _COMMENT_LINE_RE.sub(" ", text)
+
+    # Skip the FoamFile header block (the first {...} block).
+    foam_file_idx = text.find("FoamFile")
+    if foam_file_idx != -1:
+        brace_open = text.find("{", foam_file_idx)
+        if brace_open != -1:
+            depth = 0
+            for i in range(brace_open, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        text = text[i + 1:]
+                        break
+
+    patches: List[Dict[str, str]] = []
+    for match in _PATCH_BLOCK_RE.finditer(text):
+        name = match.group(1)
+        body = match.group(2)
+        type_match = _TYPE_FIELD_RE.search(body)
+        if type_match is None:
+            continue
+        patches.append({"name": name, "type": type_match.group(1)})
+
+    return patches
+
+
+def _parse_ascii_stl(stl_path: str) -> Dict[str, np.ndarray]:
+    """Parse an ASCII STL file. Returns dict with vertices, faces, normals."""
+    vertices: List[List[float]] = []
+    faces: List[List[int]] = []
+    normals_per_tri: List[List[float]] = []
+
+    current_normal: Optional[List[float]] = None
+    current_tri: List[int] = []
+
+    with open(stl_path, "r", encoding="utf-8", errors="replace") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("facet normal"):
+                parts = line.split()
+                current_normal = [float(parts[2]), float(parts[3]), float(parts[4])]
+                current_tri = []
+            elif line.startswith("vertex"):
+                parts = line.split()
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                current_tri.append(len(vertices) - 1)
+            elif line.startswith("endfacet"):
+                if len(current_tri) == 3 and current_normal is not None:
+                    faces.append(current_tri)
+                    normals_per_tri.append(current_normal)
+                current_normal = None
+                current_tri = []
+
+    if not vertices or not faces:
+        raise ValueError(f"ASCII STL contained no triangles: {stl_path}")
+
+    vertices_arr = np.asarray(vertices, dtype=np.float32)
+    faces_arr = np.asarray(faces, dtype=np.int32)
+    tri_normals = np.asarray(normals_per_tri, dtype=np.float32)
+    normals_arr = np.zeros_like(vertices_arr)
+    for tri_idx, face in enumerate(faces):
+        for vert_idx in face:
+            normals_arr[vert_idx] = tri_normals[tri_idx]
+    return {"vertices": vertices_arr, "faces": faces_arr, "normals": normals_arr}
+
+
+def parse_binary_stl(stl_path: str) -> Dict[str, np.ndarray]:
+    """Parse a binary or ASCII STL file. Returns dict with vertices, faces, normals.
+
+    Binary STL layout: 80-byte header, uint32 triangle count, then per-triangle
+    [3 floats normal, 9 floats vertices, 2 bytes attribute] = 50 bytes.
+
+    The "solid" prefix is not a reliable ASCII indicator (binary STLs sometimes
+    use it too) - file size against the binary layout is authoritative.
+    """
+    file_size = os.path.getsize(stl_path)
+    if file_size < 84:
+        raise ValueError(f"STL file too small to be valid: {stl_path}")
+
+    with open(stl_path, "rb") as f:
+        header = f.read(80)
+        tri_count_bytes = f.read(4)
+        tri_count = struct.unpack("<I", tri_count_bytes)[0]
+        expected_size = 84 + tri_count * 50
+
+        if expected_size == file_size:
+            payload = f.read(tri_count * 50)
+        else:
+            # Size mismatch -> treat as ASCII STL.
+            return _parse_ascii_stl(stl_path)
+
+    if tri_count == 0:
+        raise ValueError(f"STL file contained no triangles: {stl_path}")
+
+    dtype = np.dtype([
+        ("normal", "<f4", (3,)),
+        ("v0", "<f4", (3,)),
+        ("v1", "<f4", (3,)),
+        ("v2", "<f4", (3,)),
+        ("attr", "<u2"),
+    ])
+    tris = np.frombuffer(payload, dtype=dtype, count=tri_count)
+
+    vertices = np.empty((tri_count * 3, 3), dtype=np.float32)
+    vertices[0::3] = tris["v0"]
+    vertices[1::3] = tris["v1"]
+    vertices[2::3] = tris["v2"]
+
+    faces = np.arange(tri_count * 3, dtype=np.int32).reshape(tri_count, 3)
+
+    normals = np.empty_like(vertices)
+    tri_normals = tris["normal"].astype(np.float32)
+    normals[0::3] = tri_normals
+    normals[1::3] = tri_normals
+    normals[2::3] = tri_normals
+
+    return {"vertices": vertices, "faces": faces, "normals": normals}
+
+
+def _load_tri_surfaces(tri_surface_dir: str, warnings: List[str]) -> List[Dict]:
+    """Load every .stl in a constant/triSurface directory. Best-effort."""
+    if not os.path.isdir(tri_surface_dir):
+        return []
+
+    results: List[Dict] = []
+    for name in sorted(os.listdir(tri_surface_dir)):
+        if not name.lower().endswith(".stl"):
+            continue
+        stl_path = os.path.join(tri_surface_dir, name)
+        try:
+            mesh = parse_binary_stl(stl_path)
+        except Exception as exc:
+            warnings.append(f"Failed to load triSurface {name}: {exc}")
+            continue
+        mesh["name"] = os.path.splitext(name)[0]
+        results.append(mesh)
+    return results
+
+
+def extract_openfoam_case(selected_path: str) -> Dict:
+    """Load wind + patches + triSurface geometry from an OpenFOAM case.
+
+    `selected_path` may be the case root (containing postProcessing/) or the
+    postProcessing/surfaces folder directly.
+
+    Returns a dict with keys:
+        surfaces_dir: str
+        case_root: Optional[str]
+        wind: (data, x_coords, y_coords, z_coords, time_coords)   # required
+        patches: List[{"name": str, "type": str}]                 # may be []
+        tri_surfaces: List[{"name", "vertices", "faces", "normals"}]
+        warnings: List[str]
+    """
+    warnings: List[str] = []
+    surfaces_dir, case_root = _resolve_surfaces_dir(selected_path)
+
+    wind = extract_openfoam_wind(surfaces_dir)
+
+    patches: List[Dict[str, str]] = []
+    tri_surfaces: List[Dict] = []
+
+    if case_root is not None:
+        boundary_path = os.path.join(case_root, "constant", "polyMesh", "boundary")
+        if os.path.isfile(boundary_path):
+            try:
+                patches = parse_boundary_file(boundary_path)
+            except Exception as exc:
+                warnings.append(f"Failed to parse boundary file: {exc}")
+        else:
+            warnings.append("No constant/polyMesh/boundary file found.")
+
+        tri_surface_dir = os.path.join(case_root, "constant", "triSurface")
+        if os.path.isdir(tri_surface_dir):
+            tri_surfaces = _load_tri_surfaces(tri_surface_dir, warnings)
+            if not tri_surfaces and not warnings[-1:] == ["Failed to load triSurface"]:
+                # Empty triSurface dir is a soft warning only.
+                if not any(name.lower().endswith(".stl") for name in os.listdir(tri_surface_dir)):
+                    warnings.append("constant/triSurface contains no STL files.")
+        else:
+            warnings.append("No constant/triSurface directory found.")
+    else:
+        warnings.append(
+            "Selected path is the surfaces folder directly; case root unknown, "
+            "skipping boundary patches and triSurface geometry."
+        )
+
+    return {
+        "surfaces_dir": surfaces_dir,
+        "case_root": case_root,
+        "wind": wind,
+        "patches": patches,
+        "tri_surfaces": tri_surfaces,
+        "warnings": warnings,
+    }
