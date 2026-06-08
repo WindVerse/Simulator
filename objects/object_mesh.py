@@ -73,6 +73,40 @@ class ObjectMesh:
             'pole': np.array([0.5, 0.5, 0.5, 1.0]),
         }
         return colors.get(self.name.lower(), np.array([0.7, 0.7, 0.7, 1.0]))
+
+    @classmethod
+    def from_arrays(
+        cls,
+        name: str,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        normals: Optional[np.ndarray] = None,
+        color: Optional[np.ndarray] = None,
+        position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> "ObjectMesh":
+        """Build a static ObjectMesh directly from raw arrays.
+
+        Skips the OBJ-loading and default-mesh-generation paths in __init__.
+        Used for environment/static geometry (e.g. STL buildings) that does
+        not participate in deformation or simulation.
+        """
+        mesh = cls.__new__(cls)
+        mesh.name = name
+        mesh.position = np.array(position, dtype=np.float32)
+        mesh.scale = 1.0
+        mesh.vertices = np.asarray(vertices, dtype=np.float32)
+        mesh.faces = np.asarray(faces, dtype=np.int32)
+        mesh.current_vertices = mesh.vertices.copy()
+        mesh.previous_vertices = mesh.vertices.copy()
+        mesh.texture_coords = np.array([], dtype=np.float32)
+        default_color = np.array([0.65, 0.65, 0.68, 1.0], dtype=np.float32)
+        mesh.color = np.asarray(color, dtype=np.float32) if color is not None else default_color
+        if normals is None:
+            mesh.normals = np.zeros_like(mesh.current_vertices)
+            mesh._compute_normals()
+        else:
+            mesh.normals = np.asarray(normals, dtype=np.float32)
+        return mesh
     
     def _generate_default_mesh(self):
         """Generate a default mesh based on object type."""

@@ -4,7 +4,7 @@ An interactive 3D wind visualization tool with ML-based mesh deformation.
 
 ## Features
 
-- **OpenFOAM Sample Wind Auto-Loaded**: Bundled `wind_data/sample_wind_data` is loaded in the background on startup — no manual action required
+- **OpenFOAM Sample Case Auto-Loaded**: Bundled `wind_data/sample_openfoam_output/` (a full OpenFOAM case) is loaded in the background on startup. Wind comes from `postProcessing/surfaces/`, patch metadata from `constant/polyMesh/boundary`, and static building geometry from `constant/triSurface/*.stl`. Pick **File → Load OpenFOAM Output…** to point at a different case root.
 - **Drag-and-Drop Object Placement**: Place trees, flags, cloth, and poles into the 3D scene
 - **Real-Time Wind Visualization**: View animated wind velocity vectors in the 3D space
 - **ML-Based Deformation**: PyTorch neural network predicts mesh vertex displacements
@@ -41,8 +41,13 @@ project/
 ├── wind_data/             # Wind field data
 │   ├── __init__.py
 │   ├── wind_field.py      # 5D wind field class (component, z, y, x, time)
-│   ├── openfoam_loader.py # OpenFOAM .raw file parser
-│   └── sample_wind_data/  # Bundled OpenFOAM sample (90 time steps × 3 Z-heights)
+│   ├── openfoam_loader.py # OpenFOAM case loader (.raw wind, boundary, STL)
+│   └── sample_openfoam_output/  # Bundled OpenFOAM case
+│       ├── system/
+│       ├── constant/
+│       │   ├── polyMesh/boundary       # patch names + types
+│       │   └── triSurface/CAARC.stl    # static building geometry
+│       └── postProcessing/surfaces/    # 90 time steps × 3 Z-heights (U_zNormal_*.raw)
 └── python/                # Portable Python installation (Windows)
 ```
 
@@ -228,17 +233,24 @@ np.savez_compressed(
 wind_field.load_from_file("wind_data/custom_wind.npz")
 ```
 
-## OpenFOAM Wind Data
+## OpenFOAM Case Import
 
 ### Bundled sample (auto-loaded on startup)
 
-The repository includes a sample dataset at `wind_data/sample_wind_data/` — 90 time steps at three height slices (2 m, 5 m, 10 m). It is parsed in a background thread immediately after the window opens. The status bar shows **"Loading sample wind…"** while parsing and **"OpenFOAM sample loaded"** when complete. The grid auto-fits to the sample's spatial bounds.
+The repository includes a sample OpenFOAM case at `wind_data/sample_openfoam_output/`:
 
-### Loading a different dataset
+- `postProcessing/surfaces/` — 90 time steps at three height slices (2 m, 5 m, 10 m), as `U_zNormal_*.raw`
+- `constant/polyMesh/boundary` — patch names and types (inlet, outlet, ground, frontAndBack, model)
+- `constant/triSurface/CAARC.stl` — building geometry rendered as static, non-interactive scene mesh
 
-1. Open the **File** menu and choose **Load OpenFOAM Wind...**
-2. Select a folder that contains time-step subdirectories, each holding `U_zNormal_*.raw` files
-3. The loader reads the raw slices, builds the 5D wind array (Z-up, no axis remapping), and fits the grid
+The case is parsed in a background thread immediately after the window opens. The status bar shows **"Loading OpenFOAM case (bundled sample)…"** while parsing and a summary like **"Loaded OpenFOAM case: wind 31×21×3, 90 steps; patches: inlet(patch), outlet(patch), …; env: 1 mesh"** when complete. The grid auto-fits to the case's spatial bounds.
+
+### Loading a different case
+
+1. Open the **File** menu and choose **Load OpenFOAM Output…**
+2. Select the **case root folder** (the folder that contains `system/`, `constant/`, `0/`, `postProcessing/`). The loader auto-detects `postProcessing/surfaces/`.
+3. If you select the `postProcessing/surfaces/` folder directly, that also works — wind loads but boundary patches and triSurface geometry are skipped.
+4. The loader reads the raw wind slices, parses the boundary file, loads every `.stl` from `constant/triSurface/`, and fits the grid
 
 ### Expected `.raw` file format
 

@@ -9,7 +9,7 @@ import sys
 import os
 
 from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
+from PyQt5.QtCore import Qt, QTimer, QElapsedTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QMouseEvent, QWheelEvent
 
 from OpenGL.GL import *
@@ -18,6 +18,7 @@ from OpenGL.GLU import *
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
+from renderer.wind_colormap import magnitudes_to_colors
 from objects.object_mesh import ObjectMesh
 
 
@@ -67,12 +68,23 @@ class OpenGLWidget(QOpenGLWidget):
         
         # Drop state
         self._pending_drop_type: Optional[str] = None
-        
+
+        # Camera focus animation
+        self._focus_anim_timer = QTimer(self)
+        self._focus_anim_timer.setInterval(16)  # ~60 FPS
+        self._focus_anim_timer.timeout.connect(self._on_focus_anim_tick)
+        self._focus_anim_elapsed = QElapsedTimer()
+
         # Rendering settings
         self._bg_color = (0.1, 0.1, 0.15, 1.0)
         self._grid_color = (0.3, 0.3, 0.35, 1.0)
         self._wind_vector_color = (0.2, 0.6, 1.0, 0.7)
         self._selection_color = (1.0, 0.8, 0.0, 1.0)
+
+        # Cached wind-vector geometry. Rebuilt only when inputs change so
+        # zoom/pan paints reuse the same vertex buffer.
+        self._wind_geom_cache_key = None
+        self._wind_geom_cache = None  # ndarray (resultant) or list[ndarray] (components)
         
         # Enable mouse tracking for hover effects
         self.setMouseTracking(True)
@@ -242,7 +254,7 @@ class OpenGLWidget(QOpenGLWidget):
         glEnd()
 
         glEnable(GL_DEPTH_TEST)
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
     def _draw_grid_labels(self):
         """Draw X and Y axis ticks at the edge of the ground grid."""
@@ -275,52 +287,174 @@ class OpenGLWidget(QOpenGLWidget):
                 glVertex3f(center_x - extent - 0.5, y, 0)
                 glEnd()
     
+    _COMPONENT_COLORS = (
+        (1.0, 0.3, 0.3, 0.9),  # X — red
+        (0.3, 1.0, 0.3, 0.9),  # Y — green
+        (0.4, 0.5, 1.0, 0.9),  # Z — blue
+    )
+
     def _draw_wind_vectors(self):
-        """Draw wind velocity vectors."""
+        """Draw wind velocity vectors.
+
+        Honors scene.wind_display_mode (resultant / components),
+        scene.wind_downsample_stride (1 = every point), and
+        scene.wind_vector_scale (auto-tuned to the loaded data).
+
+        Geometry (and per-vertex colors, when colormap is on) is built once
+        per (time, stride, scale, mode, color-flag, data) tuple and reused
+        across paints — zoom/pan does not rebuild.
+        """
+        wf = self.scene.wind_field
+        points = wf.get_grid_points()
+        velocities = wf.get_current_velocities()
+
+        n = len(points)
+        if n == 0 or len(velocities) != n:
+            return
+
+        stride = max(1, int(getattr(self.scene, "wind_downsample_stride", 1)))
+        scale = float(getattr(self.scene, "wind_vector_scale", 0.3))
+        mode = getattr(self.scene, "wind_display_mode", "resultant")
+        color_by_speed = bool(getattr(self.scene, "wind_color_by_speed", True))
+
+        cache_key = (
+            id(points), wf.current_time, stride, scale, mode, id(wf.data),
+            color_by_speed,
+        )
+        if cache_key != self._wind_geom_cache_key:
+            self._wind_geom_cache = self._build_wind_geometry(
+                points, velocities, stride, scale, mode, color_by_speed
+            )
+            self._wind_geom_cache_key = cache_key
+
         glDisable(GL_LIGHTING)
         glLineWidth(2.0)
-        
-        # Sample wind vectors at grid points
-        wind_points = self.scene.wind_field.get_grid_points()
-        velocities = self.scene.wind_field.get_current_velocities()
-        
-        # Subsample for performance
-        step = max(1, len(wind_points) // 200)
-        
-        glColor4f(*self._wind_vector_color)
-        glBegin(GL_LINES)
-        
-        for i in range(0, len(wind_points), step):
-            point = wind_points[i]
-            velocity = velocities[i]
-            
-            # Scale vector for visibility
-            scale = 0.3
-            end_point = point + velocity * scale
-            
-            glVertex3f(*point)
-            glVertex3f(*end_point)
-        
-        glEnd()
-        
-        # Draw arrowheads
-        glPointSize(3.0)
-        glBegin(GL_POINTS)
-        for i in range(0, len(wind_points), step):
-            point = wind_points[i]
-            velocity = velocities[i]
-            scale = 0.3
-            end_point = point + velocity * scale
-            glVertex3f(*end_point)
-        glEnd()
-        
-        glEnable(GL_LIGHTING)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        try:
+            if mode == "components":
+                bands = self._wind_geom_cache or [None, None, None]
+                for axis, color in enumerate(self._COMPONENT_COLORS):
+                    verts = bands[axis]
+                    if verts is None or verts.size == 0:
+                        continue
+                    glColor4f(*color)
+                    glVertexPointer(3, GL_FLOAT, 0, verts)
+                    glDrawArrays(GL_LINES, 0, len(verts))
+            else:
+                verts, colors = self._wind_geom_cache or (None, None)
+                if verts is not None and verts.size > 0:
+                    glVertexPointer(3, GL_FLOAT, 0, verts)
+                    if colors is not None:
+                        glEnableClientState(GL_COLOR_ARRAY)
+                        glColorPointer(4, GL_FLOAT, 0, colors)
+                    else:
+                        glColor4f(*self._wind_vector_color)
+                    glDrawArrays(GL_LINES, 0, len(verts))
+                    if colors is not None:
+                        glDisableClientState(GL_COLOR_ARRAY)
+        finally:
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glEnable(GL_LIGHTING)
+
+    def _build_wind_geometry(self, points, velocities, stride, scale, mode, color_by_speed):
+        """Build line-segment vertex array(s) for the current wind state.
+
+        Returns:
+            Resultant mode: (vertex_array (M*6,3) float32, color_array (M*6,4) float32 or None).
+            Components mode: list of three (M_axis*6, 3) float32 vertex arrays.
+        """
+        origins = points[::stride]
+        vels = velocities[::stride]
+
+        if mode == "components":
+            return [
+                self._segments_for_displacements(
+                    origins, self._axis_displacement(vels, axis, scale)
+                )[0]
+                for axis in range(3)
+            ]
+
+        verts, lengths_kept = self._segments_for_displacements(
+            origins, vels * scale
+        )
+        if not color_by_speed or lengths_kept is None or lengths_kept.size == 0:
+            return (verts, None)
+
+        # Visual length = scale * physical speed (m/s). Recover physical speed.
+        speeds = lengths_kept / max(scale, 1e-12)
+        arrow_colors = magnitudes_to_colors(speeds)             # (M_kept, 4)
+        vertex_colors = np.repeat(arrow_colors, 6, axis=0)      # (M_kept*6, 4)
+        vertex_colors = np.ascontiguousarray(vertex_colors, dtype=np.float32)
+        return (verts, vertex_colors)
+
+    @staticmethod
+    def _axis_displacement(vels, axis, scale):
+        """Build (M,3) displacements that are zero except on `axis`."""
+        out = np.zeros_like(vels)
+        out[:, axis] = vels[:, axis] * scale
+        return out
+
+    @staticmethod
+    def _segments_for_displacements(origins, displacements):
+        """Vectorized arrow geometry → flat GL_LINES vertex array.
+
+        Filters near-zero displacements (they wouldn't draw and would cause
+        NaN units), then emits six vertices per arrow:
+            [origin, tip, tip, left, tip, right]
+        for the shaft line plus the two arrowhead wings.
+
+        Returns:
+            (segments (M*6, 3) float32, kept_lengths (M,) float32 or None).
+        """
+        sq_len = np.einsum('ij,ij->i', displacements, displacements)
+        mask = sq_len > 1e-12
+        if not np.any(mask):
+            return np.empty((0, 3), dtype=np.float32), None
+
+        origins = origins[mask]
+        disp = displacements[mask]
+        lengths = np.sqrt(sq_len[mask])
+        tips = origins + disp
+        units = disp / lengths[:, None]
+
+        # Pick a reference axis least aligned with each unit to avoid
+        # degenerate cross products when units ≈ ±X.
+        x_dominant = np.abs(units[:, 0]) > 0.9
+        ref = np.where(
+            x_dominant[:, None],
+            np.array([[0.0, 1.0, 0.0]], dtype=np.float32),
+            np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+        )
+        side = np.cross(units, ref)
+        side_norm = np.linalg.norm(side, axis=1)
+        # Any zero side-norm here is impossible given the ref choice, but
+        # guard anyway by leaving those rows' wings collapsed to the tip.
+        safe = side_norm > 1e-6
+        side[safe] = side[safe] / side_norm[safe, None]
+        side[~safe] = 0.0
+
+        head_len = np.clip(0.2 * lengths, 0.05, 0.3)[:, None]
+        base = tips - units * head_len
+        wing = side * (head_len * 0.5)
+        left = base + wing
+        right = base - wing
+
+        # Stack as (M, 6, 3) then flatten: each row contributes shaft+wings.
+        segments = np.stack([origins, tips, tips, left, tips, right], axis=1)
+        return (
+            np.ascontiguousarray(segments.reshape(-1, 3), dtype=np.float32),
+            lengths.astype(np.float32, copy=False),
+        )
     
     def _draw_objects(self):
         """Draw all objects in the scene."""
         for obj in self.scene.objects:
             is_selected = obj is self.scene.selected_object
             self._draw_mesh(obj, is_selected)
+
+        if getattr(self.scene, "environment_visible", True):
+            for env_mesh in getattr(self.scene, "environment_meshes", ()):
+                self._draw_mesh(env_mesh, selected=False)
     
     def _draw_mesh(self, mesh: ObjectMesh, selected: bool = False):
         """
@@ -536,14 +670,17 @@ class OpenGLWidget(QOpenGLWidget):
                     self.update()
         elif self._mouse_button == Qt.RightButton:
             # Orbit camera
+            self._cancel_focus_animation()
             self.scene.camera.orbit(dx * 0.5, -dy * 0.5)
             self.update()
         elif self._mouse_button == Qt.MiddleButton:
             # Pan camera
+            self._cancel_focus_animation()
             self.scene.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         elif self._mouse_button == Qt.LeftButton and not self._dragged_object:
             # Pan camera on left button click on empty grid
+            self._cancel_focus_animation()
             self.scene.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         
@@ -570,6 +707,7 @@ class OpenGLWidget(QOpenGLWidget):
     
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zoom."""
+        self._cancel_focus_animation()
         delta = event.angleDelta().y() / 120.0
         self.scene.camera.zoom(delta)
         self.update()
@@ -640,7 +778,34 @@ class OpenGLWidget(QOpenGLWidget):
         """Cancel any pending drop operation."""
         self._pending_drop_type = None
         self.setCursor(Qt.ArrowCursor)
-    
+
+    def start_focus_on_object(self, mesh: ObjectMesh):
+        """Begin a smooth camera dolly-in centered on the given mesh."""
+        if mesh is None:
+            return
+        center = mesh.get_center()
+        min_c, max_c = mesh.get_bounding_box()
+        radius = float(np.linalg.norm(max_c - min_c) * 0.5)
+        if not np.isfinite(radius) or radius <= 0.0:
+            radius = 1.0
+        self.scene.camera.focus_on(center, radius=radius)
+        self._focus_anim_elapsed.restart()
+        self._focus_anim_timer.start()
+
+    def _cancel_focus_animation(self):
+        """Cancel a running focus animation (no-op if not active)."""
+        if self._focus_anim_timer.isActive():
+            self._focus_anim_timer.stop()
+        self.scene.camera.cancel_focus_animation()
+
+    def _on_focus_anim_tick(self):
+        """Per-frame tick that advances the camera focus animation."""
+        dt = self._focus_anim_elapsed.restart() / 1000.0
+        still_animating = self.scene.camera.tick_focus_animation(dt)
+        self.update()
+        if not still_animating:
+            self._focus_anim_timer.stop()
+
     # Drag and drop support
     def dragEnterEvent(self, event):
         """Handle drag enter."""
