@@ -291,6 +291,51 @@ class WindField:
 
         return result
 
+    def get_velocity_at_8_octants(
+        self,
+        position: np.ndarray,
+        cube_size: float = 1.0,
+        time: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Get wind velocity at 8 octant positions around a center point.
+        Useful for spatial wind variation sampling.
+
+        Args:
+            position: Physical position (x, y, z) of the cube center
+            cube_size: Size of each cube (default 1.0m). Offset is ±cube_size/2
+            time: Time step index (uses current_time if None)
+
+        Returns:
+            Array of shape (8, 3) with velocities at each octant:
+            [0: (−,−,−), 1: (−,−,+), 2: (−,+,−), 3: (−,+,+),
+            4: (+,−,−), 5: (+,−,+), 6: (+,+,−), 7: (+,+,+)]
+        """
+        if time is None:
+            time = self.current_time
+
+        offset = cube_size / 2.0
+        
+        # Octant offsets matching cube_index = ix*4 + iy*2 + iz
+        # where ix,iy,iz ∈ {0,1}: 0→-offset, 1→+offset
+        octant_offsets = [
+            [-offset, -offset, -offset],  # 0: (0,0,0)
+            [-offset, -offset, +offset],  # 1: (0,0,1)
+            [-offset, +offset, -offset],  # 2: (0,1,0)
+            [-offset, +offset, +offset],  # 3: (0,1,1)
+            [+offset, -offset, -offset],  # 4: (1,0,0)
+            [+offset, -offset, +offset],  # 5: (1,0,1)
+            [+offset, +offset, -offset],  # 6: (1,1,0)
+            [+offset, +offset, +offset],  # 7: (1,1,1)
+        ]
+        
+        velocities = np.zeros((8, 3), dtype=np.float32)
+        for i, offset_vec in enumerate(octant_offsets):
+            sample_pos = position + np.array(offset_vec, dtype=np.float32)
+            velocities[i] = self.get_velocity_at_position(sample_pos, time)
+        
+        return velocities
+
     def advance_time(self, delta: int = 1):
         """
         Advance the current time index.

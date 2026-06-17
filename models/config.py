@@ -31,7 +31,7 @@ if IS_TEST:
     HIDDEN_DIM = 32
 else:
     NO_MLP_HIDDEN_LAYERS = 2
-    NO_GNN_LAYERS = 12
+    NO_GNN_LAYERS = 10    #12
     NO_LSTM_LAYERS = 3
     CNN_CHANNELS = [16, 32, 64] # Try [16, 32] for shallower, or [16, 32, 64, 128] for deeper (Only for LSTM_CNN)
     HIDDEN_DIM = 128
@@ -96,7 +96,7 @@ FLAG_STEP_SIZE = 1e-3 # α             # step size for a forward pass
 
 LAMBDA_RMSE = 1
 LAMBDA_POSITIONAL = 0
-LAMBDA_CHAMFER = 100
+LAMBDA_CHAMFER = 10   #100
 LAMBDA_EDGE = 100
 LAMBDA_SMOOTH = 0.0    # Weight for Smoothness
 LAMBDA_AREA = 0

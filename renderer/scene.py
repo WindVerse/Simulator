@@ -390,6 +390,17 @@ class Scene:
             obj_path = self._get_default_obj_path(object_type)
 
         mesh = ObjectMesh(object_type, obj_path, position)
+
+        if len(mesh.vertices) > 0:
+            mesh_z_min = np.min(mesh.vertices[:, 2])
+            mesh_z_max = np.max(mesh.vertices[:, 2])
+            extra_offset = 0.0
+            if object_type.lower() == 'flag':
+                extra_offset = 1.0  # Increase this value to lift flag higher (1.0 = 1 meter)
+            
+            # Position so bottom sits at ground level + any extra offset
+            mesh.position[2] = position[2] + (-mesh_z_min) + extra_offset
+        
         
         # Load a topology that is valid for this mesh.
         edge_index = self._load_edge_index_for_mesh(mesh).to(self.device)
@@ -484,7 +495,7 @@ class Scene:
     
     def get_wind_at_object(self, mesh: ObjectMesh) -> np.ndarray:
         """
-        Get wind velocity at an object's position.
+        Get wind velocities around 8 cubes at an object's position.
         
         Args:
             mesh: The object mesh
@@ -492,8 +503,11 @@ class Scene:
         Returns:
             Wind velocity vector
         """
-        center = mesh.get_center()
-        return self.wind_field.get_velocity_at_position(center)
+        if mesh.name.lower() == 'flag':
+            center = mesh.get_pole_center()
+        else:
+            center = mesh.get_center()
+        return self.wind_field.get_velocity_at_8_octants(center, cube_size=1.0)
     
     def snap_to_grid(self, position: np.ndarray) -> np.ndarray:
         """

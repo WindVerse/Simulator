@@ -203,6 +203,16 @@ class SimulationController(QObject):
         vertices = obj.current_vertices.copy()
         previous_vertices = obj.previous_vertices.copy()
 
+        if obj.name.lower() == 'flag' and self._frame_count < 5:
+            print(f"\n=== FRAME {self._frame_count}: VERTICES BEFORE MODEL ===")
+            print(f"Current vertices shape: {vertices.shape}")
+            print(f"Current range: X [{vertices[:, 0].min():.3f}, {vertices[:, 0].max():.3f}]")
+            print(f"              Y [{vertices[:, 1].min():.3f}, {vertices[:, 1].max():.3f}]")
+            print(f"              Z [{vertices[:, 2].min():.3f}, {vertices[:, 2].max():.3f}]")
+            print(f"First 3 vertices: {vertices[:3]}")
+            print(f"Wind velocity: {wind_velocity}")
+    
+
         # Run MeshGraphNet inference — returns next-frame positions, or None
         # if the object's topology does not match the trained mesh.
         next_vertices = self.deformation_model.predict(
@@ -213,10 +223,18 @@ class SimulationController(QObject):
         )
         if next_vertices is None:
             return
+        
+        if obj.name.lower() == 'flag' and self._frame_count < 5:
+            print(f"Next vertices shape: {next_vertices.shape}")
+            print(f"Next range: X [{next_vertices[:, 0].min():.3f}, {next_vertices[:, 0].max():.3f}]")
+            print(f"           Y [{next_vertices[:, 1].min():.3f}, {next_vertices[:, 1].max():.3f}]")
+            print(f"           Z [{next_vertices[:, 2].min():.3f}, {next_vertices[:, 2].max():.3f}]")
+            print(f"First 3 next vertices: {next_vertices[:3]}\n")
+    
 
         # Apply object-specific constraints and commit
-        new_vertices = self._apply_constraints(obj, next_vertices)
-        obj.update_vertices(new_vertices)
+        # new_vertices = self._apply_constraints(obj, next_vertices)
+        obj.update_vertices(next_vertices)
     
     def _apply_constraints(
         self,

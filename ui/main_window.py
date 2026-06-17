@@ -534,6 +534,18 @@ class MainWindow(QMainWindow):
     def _add_object(self, object_type: str, x: float, y: float, z: float):
         """Add an object to the scene."""
         mesh = self.scene.add_object(object_type, (x, y, z))
+
+        if object_type.lower() == 'flag':
+            world_verts = mesh.get_world_vertices()
+            print(f"\n=== FLAG PLANTED IN SCENE ===")
+            print(f"Object position: {mesh.position}")
+            print(f"Number of vertices: {len(world_verts)}")
+            print(f"Vertex position range: X [{world_verts[:, 0].min():.3f}, {world_verts[:, 0].max():.3f}]")
+            print(f"                      Y [{world_verts[:, 1].min():.3f}, {world_verts[:, 1].max():.3f}]")
+            print(f"                      Z [{world_verts[:, 2].min():.3f}, {world_verts[:, 2].max():.3f}]")
+            print(f"First 5 world vertices:\n{world_verts[:5]}")
+            print(f"Pole center (attachment point): {mesh.get_pole_center()}\n")
+    
         
         # Get structural payload with pole center for ML parsing
         payload = mesh.get_info_payload()
