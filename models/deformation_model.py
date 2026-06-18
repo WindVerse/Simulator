@@ -38,6 +38,8 @@ class DeformationModel:
         self.batch_pin_mask = cfg.PIN_MASK.to(self.device)
         self.pin_mask_bool = self.batch_pin_mask.squeeze(-1).bool()
         self.expected_num_vertices = cfg.NUM_VERTICES
+        self.std_acc = torch.tensor(np.load(cfg.STD_ACC), device=self.device, dtype=torch.float32).view(1, -1)
+        self.mean_acc = torch.tensor(np.load(cfg.MEAN_ACC), device=self.device, dtype=torch.float32).view(1, -1)
 
         # Strain projection (PBD) — clamp edges to within MAX_STRAIN × rest_length
         # after the unbounded model decoder, otherwise OOD wind can blow vertices
@@ -51,7 +53,7 @@ class DeformationModel:
 
         # Load model
         self.model = load_model(self.device)
-        model_path = os.path.join(os.path.dirname(__file__), "best_model.pth")
+        model_path = os.path.join(os.path.dirname(__file__), "best_model_1.pth")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model not found at {model_path}")
         self.model.load_state_dict(
@@ -99,11 +101,29 @@ class DeformationModel:
             curr_pos = torch.as_tensor(vertices, device=self.device, dtype=torch.float32)
             prev_pos = torch.as_tensor(previous_vertices, device=self.device, dtype=torch.float32)
 
+            if curr_pos.shape[0] > 0:  # Debug first few frames silently
+                print(f"[Model] Input vertices - shape: {curr_pos.shape}, range X: [{curr_pos[:, 0].min():.3f}, {curr_pos[:, 0].max():.3f}]")
+
+            # print(f"\n[TENSOR CONVERSION]")
+            # print(f"curr_pos shape: {curr_pos.shape}")
+            # print(f"curr_pos dtype: {curr_pos.dtype}")
+            # print(f"curr_pos device: {curr_pos.device}")
+            # print(f"curr_pos (first 5 vertices):\n{curr_pos[:5]}")
+            
+            # print(f"\nprev_pos shape: {prev_pos.shape}")
+            # print(f"prev_pos dtype: {prev_pos.dtype}")
+            # print(f"prev_pos device: {prev_pos.device}")
+            # print(f"prev_pos (first 5 vertices):\n{prev_pos[:5]}")
+        
             wind_arr = np.asarray(wind_velocity, dtype=np.float32)
-            if wind_arr.ndim == 1:
-                # Broadcast a single uniform wind sample to the 8 octants the model expects
-                wind_arr = np.tile(wind_arr.reshape(1, 3), (8, 1))
-            curr_wind_raw = torch.as_tensor(wind_arr, device=self.device, dtype=torch.float32)
+            # if wind_arr.ndim == 1:
+            #     print("wind velocity is a single vector, broadcasting to 8 octants")
+            #     # Broadcast a single uniform wind sample to the 8 octants the model expects
+            #     wind_arr = np.tile(wind_arr.reshape(1, 3), (8, 1))
+            curr_wind_raw = torch.as_tensor(wind_arr, device=self.device)
+
+            print(f"[Wind Velocity] Input: {wind_velocity}, Shape: {wind_arr.shape}")
+            print(f"[Wind Vector - Raw] curr_wind_raw:\n{curr_wind_raw}")
 
             if torch.is_tensor(rest_lengths):
                 rest_lengths_t = rest_lengths.to(device=self.device, dtype=torch.float32)
@@ -146,68 +166,45 @@ class DeformationModel:
             # ---- Inference ----
             # Encoder applies LayerNorm internally; decoder output is in physical units.
             pred = self.model(node_features, self.edge_index, edge_attr)
+            print(f"std_acc: {self.std_acc}")
+            print(f"mean_acc: {self.mean_acc}")
+            pred_real_acc = pred * self.std_acc + self.mean_acc
+
+            print(f"pred shape: {pred.shape}, pred sample: {pred[:5]}")
+            print(f"std_acc shape: {self.std_acc.shape}")
+            print(f"mean_acc shape: {self.mean_acc.shape}")
 
             # ---- Enforce pinned-node boundary condition ----
             H, W = cfg.HEIGHT, cfg.WIDTH
             pinned_indices = [r * W for r in range(H)]
-            pred[pinned_indices, :] = 0.0
+            pred_real_acc[pinned_indices, :] = 0.0
+
+            # print(f"\n[PINNED VERTICES - BEFORE INTEGRATION]")
+            # print(f"Number of pinned vertices: {len(pinned_indices)}")
+            # print(f"Pinned indices: {pinned_indices[:5]}... (showing first 5)")
+            # print(f"Pinned curr_pos (first 5): \n{curr_pos[pinned_indices[:5]].detach().cpu().numpy()}")
+            # print(f"Pinned prev_pos (first 5): \n{prev_pos[pinned_indices[:5]].detach().cpu().numpy()}")
+            # print(f"Pinned velocity before integration (curr - prev, first 5): \n{(curr_pos[pinned_indices[:5]] - prev_pos[pinned_indices[:5]]).detach().cpu().numpy()}")
+
 
             # ---- Physics integration ----
             kinematic_vel = (curr_pos - prev_pos) / cfg.DELTA_T
 
             if cfg.TARGET_TYPE in ("accelerations", "acc_new"):
-                next_pos, _ = self.integrate(curr_pos, kinematic_vel, pred, cfg.DELTA_T)
+                next_pos, _ = self.integrate(curr_pos, kinematic_vel, pred_real_acc, cfg.DELTA_T)
             elif cfg.TARGET_TYPE == "acc":
-                next_pos = (2 * curr_pos) - prev_pos + pred
+                next_pos = (2 * curr_pos) - prev_pos + pred_real_acc
             elif cfg.TARGET_TYPE == "displacements":
-                next_pos = curr_pos + pred
+                next_pos = curr_pos + pred_real_acc
             else:
                 raise ValueError(f"Unknown TARGET_TYPE in config: {cfg.TARGET_TYPE}")
+            
+            print(f"pred_real_acc shape: {pred_real_acc.shape}, sample: {pred_real_acc[:5]}")
 
-            # Re-pin to be safe after integration
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
+            print(f"\n[PINNED VERTICES - AFTER INTEGRATION]")
+            print(f"Pinned next_pos (first 5): \n{next_pos[pinned_indices[:5]].detach().cpu().numpy()}")
+            print(f"Did pinned vertices change? {not torch.allclose(curr_pos[pinned_indices], next_pos[pinned_indices], atol=1e-5)}")
+            
 
-            # ---- Cap per-tick displacement ----
-            # The decoder is unbounded; under OOD wind a single forward pass can
-            # produce predictions that translate vertices by several metres in
-            # one tick. Clamp the per-tick movement of each free vertex to a
-            # fraction of the mean rest length so the mesh cannot blow up
-            # before the strain projection has a chance to act.
-            max_step = 0.5 * rest_lengths_t.mean()
-            step = next_pos - curr_pos
-            step_norm = torch.norm(step, dim=-1, keepdim=True).clamp_min(1e-8)
-            scale = torch.minimum(torch.ones_like(step_norm), max_step / step_norm)
-            next_pos = curr_pos + step * scale
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
-
-            # ---- XPBD-style edge-length projection ----
-            # The decoder is unbounded, so without this the mesh can drift
-            # arbitrarily under OOD wind. Project any over-stretched edges back
-            # to MAX_STRAIN × rest_length, splitting the correction between free
-            # endpoints. Pinned vertices stay fixed.
-            row, col = self.edge_index
-            max_len = rest_lengths_t * self.max_strain
-            free_mask = (~self.pin_mask_bool).float().unsqueeze(-1)
-            w_row = free_mask[row]
-            w_col = free_mask[col]
-            w_sum = (w_row + w_col).clamp_min(1.0)
-
-            for _ in range(self.projection_iters):
-                delta = next_pos[row] - next_pos[col]
-                length = torch.norm(delta, dim=-1).clamp_min(1e-8)
-                excess = (length - max_len).clamp_min(0.0)
-                if excess.max() == 0:
-                    break
-                direction = delta / length.unsqueeze(-1)
-                # 0.5: edge_index is bidirectional, every undirected edge
-                # appears as both (i,j) and (j,i).
-                # inv_degree[v]: Jacobi damping — vertex v receives corrections
-                # from all its incident edges in the same pass, so divide by
-                # the vertex's degree to prevent overshoot.
-                correction = 0.5 * excess.unsqueeze(-1) * direction
-                next_pos.index_add_(0, row, -correction * (w_row / w_sum) * self.inv_degree[row])
-                next_pos.index_add_(0, col,  correction * (w_col / w_sum) * self.inv_degree[col])
-
-            next_pos[pinned_indices, :] = curr_pos[pinned_indices, :]
 
             return next_pos.detach().cpu().numpy()
