@@ -29,6 +29,7 @@ from objects.object_mesh import ObjectMesh
 from models.deformation_model import DeformationModel
 from ui.object_library import ObjectLibraryPanel
 from ui.simulation_controller import SimulationController
+from ui import theme
 
 
 class _OpenFOAMCaseLoadWorker(QThread):
@@ -80,41 +81,15 @@ class ControlPanel(QWidget):
         
         # Play/Pause button
         self.play_btn = QPushButton("Play")
+        self.play_btn.setObjectName("playButton")
         self.play_btn.setCheckable(True)
         self.play_btn.clicked.connect(self._toggle_simulation)
-        self.play_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:checked {
-                background-color: #FF9800;
-            }
-            QPushButton:hover {
-                opacity: 0.8;
-            }
-        """)
         sim_layout.addWidget(self.play_btn)
-        
+
         # Reset button
         self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setObjectName("resetButton")
         self.reset_btn.clicked.connect(self.controller.reset)
-        self.reset_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #607D8B;
-                color: white;
-                border: none;
-                padding: 6px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #78909C;
-            }
-        """)
         sim_layout.addWidget(self.reset_btn)
 
         layout.addWidget(sim_group)
@@ -125,20 +100,16 @@ class ControlPanel(QWidget):
         
         self.grid_cb = QCheckBox("Show Grid")
         self.grid_cb.setChecked(True)
-        self.grid_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.grid_cb)
-        
+
         self.wind_cb = QCheckBox("Show Wind Vectors")
         self.wind_cb.setChecked(True)
-        self.wind_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.wind_cb)
 
         # Wind display mode: resultant vs. per-component arrows
         self.wind_mode_resultant_rb = QRadioButton("Resultant")
         self.wind_mode_resultant_rb.setChecked(True)
-        self.wind_mode_resultant_rb.setStyleSheet("color: #ccc;")
         self.wind_mode_components_rb = QRadioButton("Components (X/Y/Z)")
-        self.wind_mode_components_rb.setStyleSheet("color: #ccc;")
         self.wind_mode_group = QButtonGroup(self)
         self.wind_mode_group.addButton(self.wind_mode_resultant_rb)
         self.wind_mode_group.addButton(self.wind_mode_components_rb)
@@ -148,7 +119,6 @@ class ControlPanel(QWidget):
         # Downsample stride: 1 = show every vector.
         stride_row = QHBoxLayout()
         stride_label = QLabel("Stride:")
-        stride_label.setStyleSheet("color: #ccc;")
         stride_row.addWidget(stride_label)
         self.wind_stride_spin = QSpinBox()
         self.wind_stride_spin.setRange(1, 50)
@@ -163,7 +133,6 @@ class ControlPanel(QWidget):
         # Apply the Beaufort colormap (resultant mode only).
         self.wind_color_cb = QCheckBox("Color by speed")
         self.wind_color_cb.setChecked(True)
-        self.wind_color_cb.setStyleSheet("color: #ccc;")
         self.wind_color_cb.setToolTip(
             "Color arrows by wind speed (Beaufort bands). Resultant mode only."
         )
@@ -171,7 +140,6 @@ class ControlPanel(QWidget):
 
         self.env_cb = QCheckBox("Show Environment")
         self.env_cb.setChecked(True)
-        self.env_cb.setStyleSheet("color: #ccc;")
         display_layout.addWidget(self.env_cb)
 
         layout.addWidget(display_group)
@@ -189,10 +157,10 @@ class ControlPanel(QWidget):
             r, g, b, _a = rgba
             swatch.setStyleSheet(
                 f"background-color: rgb({int(r*255)}, {int(g*255)}, {int(b*255)});"
-                f" border: 1px solid #444;"
+                f" border: 1px solid {theme.BORDER}; border-radius: 2px;"
             )
             text = QLabel(f"{range_text}  {label}")
-            text.setStyleSheet("color: #ccc; font-family: monospace; font-size: 11px;")
+            text.setObjectName("statValue")
             row.addWidget(swatch)
             row.addWidget(text)
             row.addStretch()
@@ -205,31 +173,18 @@ class ControlPanel(QWidget):
         stats_layout = QVBoxLayout(stats_group)
         
         self.stats_label = QLabel("FPS: --\nFrame: 0\nTime: 0.0s")
-        self.stats_label.setStyleSheet("color: #888; font-family: monospace;")
+        self.stats_label.setObjectName("statValue")
         stats_layout.addWidget(self.stats_label)
-        
+
         layout.addWidget(stats_group)
-        
+
         # Spacer
         layout.addStretch()
-        
-        # Style
-        self.setStyleSheet("""
-            QGroupBox {
-                color: #ccc;
-                border: 1px solid #444;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-            }
-        """)
-        
-        self.setMinimumWidth(180)
-        self.setMaximumWidth(220)
+
+        # Group-box / widget styling is provided globally by ui.theme.
+
+        self.setMinimumWidth(190)
+        self.setMaximumWidth(240)
     
     def _toggle_simulation(self, checked: bool):
         """Toggle simulation play state."""
@@ -306,44 +261,9 @@ class MainWindow(QMainWindow):
         """Set up the user interface."""
         self.setWindowTitle("Wind Visualization System")
         self.setMinimumSize(1200, 800)
-        
-        # Set dark theme
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1e1e1e;
-            }
-            QMenuBar {
-                background-color: #2d2d2d;
-                color: #ccc;
-            }
-            QMenuBar::item:selected {
-                background-color: #3d3d3d;
-            }
-            QMenu {
-                background-color: #2d2d2d;
-                color: #ccc;
-            }
-            QMenu::item:selected {
-                background-color: #3d3d3d;
-            }
-            QToolBar {
-                background-color: #2d2d2d;
-                border: none;
-                spacing: 4px;
-            }
-            QStatusBar {
-                background-color: #2d2d2d;
-                color: #888;
-            }
-            QDockWidget {
-                color: #ccc;
-            }
-            QDockWidget::title {
-                background-color: #2d2d2d;
-                padding: 4px;
-            }
-        """)
-        
+
+        # The dark theme is applied application-wide in ui.theme (apply_theme).
+
         # Create central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -443,11 +363,12 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(self.status_label, stretch=1)
         
         self.coord_label = QLabel("X: -- Y: -- Z: --")
+        self.coord_label.setObjectName("statValue")
         self.coord_label.setMinimumWidth(220)
-        self.coord_label.setStyleSheet("font-family: monospace; color: #aaa;")
         self.status_bar.addPermanentWidget(self.coord_label)
-        
+
         self.fps_label = QLabel("FPS: --")
+        self.fps_label.setObjectName("statValue")
         self.status_bar.addPermanentWidget(self.fps_label)
     
     def _create_menus(self):

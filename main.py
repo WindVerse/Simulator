@@ -28,9 +28,10 @@ def main():
     app.setApplicationName("Wind Visualization System")
     app.setOrganizationName("WindViz")
     
-    # Set application style
-    app.setStyle("Fusion")
-    
+    # Apply the refined-dark theme application-wide (style + palette + QSS)
+    from ui.theme import apply_theme
+    apply_theme(app)
+
     # Import and create main window
     # (Import here to allow dependency checking first)
     from ui.main_window import MainWindow

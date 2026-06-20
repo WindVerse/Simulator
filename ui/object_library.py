@@ -34,31 +34,28 @@ class ObjectButton(QPushButton):
         """Set up the button appearance."""
         # Set text
         self.setText(self.object_type.capitalize())
-        
-        # Style
+
+        # Structural styling (rounded, bold, padding) comes from ui.theme
+        # via the #objectTile selector; only the per-type color lives here.
+        self.setObjectName("objectTile")
         self.setMinimumSize(80, 80)
         self.setMaximumSize(100, 100)
         self.setCursor(Qt.OpenHandCursor)
-        
+
         # Color based on type
         colors = {
             'flag': '#F44336',
         }
         color = colors.get(self.object_type.lower(), '#607D8B')
-        
+
         self.setStyleSheet(f"""
-            QPushButton {{
+            QPushButton#objectTile {{
                 background-color: {color};
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-weight: bold;
-                font-size: 12px;
             }}
-            QPushButton:hover {{
+            QPushButton#objectTile:hover {{
                 background-color: {self._lighten_color(color)};
             }}
-            QPushButton:pressed {{
+            QPushButton#objectTile:pressed {{
                 background-color: {self._darken_color(color)};
             }}
         """)
@@ -139,31 +136,18 @@ class ObjectLibraryPanel(QWidget):
         
         # Title
         title = QLabel("Object Library")
-        title.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                color: #ffffff;
-                padding: 4px;
-            }
-        """)
+        title.setObjectName("panelTitle")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
-        
+
         # Separator
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("background-color: #444;")
         layout.addWidget(separator)
-        
+
         # Instructions
         instructions = QLabel("Drag objects to the viewport\nor click to select")
-        instructions.setStyleSheet("""
-            QLabel {
-                color: #888;
-                font-size: 11px;
-            }
-        """)
+        instructions.setObjectName("panelHint")
         instructions.setAlignment(Qt.AlignCenter)
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
@@ -192,19 +176,13 @@ class ObjectLibraryPanel(QWidget):
         
         # Object count label
         self.count_label = QLabel("Objects in scene: 0")
-        self.count_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.count_label.setObjectName("panelHint")
         self.count_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.count_label)
-        
-        # Set panel style
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #2d2d2d;
-            }
-        """)
-        
-        self.setMinimumWidth(180)
-        self.setMaximumWidth(220)
+
+        # Panel background / widget styling comes from ui.theme.
+        self.setMinimumWidth(190)
+        self.setMaximumWidth(240)
     
     def update_object_count(self, count: int):
         """
