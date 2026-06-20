@@ -42,10 +42,7 @@ class ObjectButton(QPushButton):
         
         # Color based on type
         colors = {
-            'tree': '#4CAF50',
             'flag': '#F44336',
-            'cloth': '#9E9E9E',
-            'pole': '#795548'
         }
         color = colors.get(self.object_type.lower(), '#607D8B')
         
@@ -177,7 +174,7 @@ class ObjectLibraryPanel(QWidget):
         grid_layout.setSpacing(8)
         
         # Available object types
-        object_types = ['tree', 'flag', 'cloth', 'pole']
+        object_types = ['flag']
         
         for i, obj_type in enumerate(object_types):
             button = ObjectButton(obj_type)

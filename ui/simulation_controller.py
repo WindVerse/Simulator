@@ -256,29 +256,7 @@ class SimulationController(QObject):
             # Fix the left edge (attached to pole)
             fixed_mask = obj.vertices[:, 0] < 0.1
             new_vertices[fixed_mask] = obj.vertices[fixed_mask]
-        
-        elif obj.name.lower() == 'cloth':
-            # Fix corner vertices
-            corners = [
-                (obj.vertices[:, 0].min(), obj.vertices[:, 2].min()),
-                (obj.vertices[:, 0].max(), obj.vertices[:, 2].min()),
-            ]
-            for cx, cz in corners:
-                mask = (
-                    (np.abs(obj.vertices[:, 0] - cx) < 0.2) &
-                    (np.abs(obj.vertices[:, 2] - cz) < 0.2)
-                )
-                new_vertices[mask] = obj.vertices[mask]
-        
-        elif obj.name.lower() == 'tree':
-            # Fix the base (roots)
-            fixed_mask = obj.vertices[:, 1] < 0.5
-            new_vertices[fixed_mask] = obj.vertices[fixed_mask]
-        
-        elif obj.name.lower() == 'pole':
-            # Poles don't deform much
-            new_vertices = obj.vertices.copy()
-        
+
         return new_vertices
     
     def _update_fps(self, dt: float):

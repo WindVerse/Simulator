@@ -18,7 +18,7 @@ class ObjectMesh:
     - Normals: Surface normals for rendering
     
     Attributes:
-        name: Name/type of the object (tree, flag, cloth, pole)
+        name: Name/type of the object (flag)
         vertices: Original vertex positions (N, 3)
         current_vertices: Current deformed vertex positions
         faces: Triangle indices (M, 3)
@@ -38,7 +38,7 @@ class ObjectMesh:
         Initialize the mesh object.
         
         Args:
-            name: Object type name (tree, flag, cloth, pole)
+            name: Object type name (flag)
             obj_path: Path to OBJ file (generates default if None)
             position: Initial world position
         """
@@ -67,10 +67,7 @@ class ObjectMesh:
     def _get_default_color(self) -> np.ndarray:
         """Get default color based on object type."""
         colors = {
-            'tree': np.array([0.2, 0.6, 0.2, 1.0]),
             'flag': np.array([0.8, 0.2, 0.2, 1.0]),
-            'cloth': np.array([0.9, 0.9, 0.9, 1.0]),
-            'pole': np.array([0.5, 0.5, 0.5, 1.0]),
         }
         return colors.get(self.name.lower(), np.array([0.7, 0.7, 0.7, 1.0]))
 
@@ -111,12 +108,9 @@ class ObjectMesh:
     def _generate_default_mesh(self):
         """Generate a default mesh based on object type."""
         generators = {
-            'tree': self._generate_tree,
             'flag': self._generate_flag,
-            'cloth': self._generate_cloth,
-            'pole': self._generate_pole,
         }
-        
+
         generator = generators.get(self.name.lower(), self._generate_cube)
         generator()
         
@@ -126,59 +120,6 @@ class ObjectMesh:
         
         # Compute initial normals
         self._compute_normals()
-    
-    def _generate_tree(self):
-        """Generate a simple tree mesh (trunk + foliage)."""
-        vertices = []
-        faces = []
-        
-        # Trunk (cylinder approximation)
-        trunk_height = 2.0
-        trunk_radius = 0.2
-        segments = 8
-        
-        for i in range(segments):
-            angle = 2 * np.pi * i / segments
-            x = trunk_radius * np.cos(angle)
-            z = trunk_radius * np.sin(angle)
-            vertices.append([x, 0, z])
-            vertices.append([x, trunk_height, z])
-        
-        # Trunk faces
-        for i in range(segments):
-            i1 = i * 2
-            i2 = i * 2 + 1
-            i3 = ((i + 1) % segments) * 2
-            i4 = ((i + 1) % segments) * 2 + 1
-            faces.append([i1, i3, i2])
-            faces.append([i2, i3, i4])
-        
-        trunk_vertex_count = len(vertices)
-        
-        # Foliage (cone approximation)
-        foliage_height = 3.0
-        foliage_radius = 1.5
-        foliage_base = trunk_height
-        
-        # Foliage base vertices
-        for i in range(segments):
-            angle = 2 * np.pi * i / segments
-            x = foliage_radius * np.cos(angle)
-            z = foliage_radius * np.sin(angle)
-            vertices.append([x, foliage_base, z])
-        
-        # Foliage tip
-        tip_index = len(vertices)
-        vertices.append([0, foliage_base + foliage_height, 0])
-        
-        # Foliage faces
-        for i in range(segments):
-            i1 = trunk_vertex_count + i
-            i2 = trunk_vertex_count + ((i + 1) % segments)
-            faces.append([i1, i2, tip_index])
-        
-        self.vertices = np.array(vertices, dtype=np.float32)
-        self.faces = np.array(faces, dtype=np.int32)
     
     def _generate_flag(self):
         """Generate a flag mesh (rectangular cloth)."""
@@ -206,62 +147,6 @@ class ObjectMesh:
                 i4 = i3 + 1
                 faces.append([i1, i3, i2])
                 faces.append([i2, i3, i4])
-        
-        self.vertices = np.array(vertices, dtype=np.float32)
-        self.faces = np.array(faces, dtype=np.int32)
-    
-    def _generate_cloth(self):
-        """Generate a cloth mesh (square grid)."""
-        size = 3.0
-        subdivisions = 15
-        
-        vertices = []
-        faces = []
-        
-        for j in range(subdivisions + 1):
-            for i in range(subdivisions + 1):
-                x = (i / subdivisions - 0.5) * size
-                y = 3.0  # Height above ground
-                z = (j / subdivisions - 0.5) * size
-                vertices.append([x, y, z])
-        
-        # Generate faces
-        for j in range(subdivisions):
-            for i in range(subdivisions):
-                i1 = j * (subdivisions + 1) + i
-                i2 = i1 + 1
-                i3 = i1 + subdivisions + 1
-                i4 = i3 + 1
-                faces.append([i1, i3, i2])
-                faces.append([i2, i3, i4])
-        
-        self.vertices = np.array(vertices, dtype=np.float32)
-        self.faces = np.array(faces, dtype=np.int32)
-    
-    def _generate_pole(self):
-        """Generate a pole mesh (tall cylinder)."""
-        height = 4.0
-        radius = 0.1
-        segments = 8
-        
-        vertices = []
-        faces = []
-        
-        for i in range(segments):
-            angle = 2 * np.pi * i / segments
-            x = radius * np.cos(angle)
-            z = radius * np.sin(angle)
-            vertices.append([x, 0, z])
-            vertices.append([x, height, z])
-        
-        # Side faces
-        for i in range(segments):
-            i1 = i * 2
-            i2 = i * 2 + 1
-            i3 = ((i + 1) % segments) * 2
-            i4 = ((i + 1) % segments) * 2 + 1
-            faces.append([i1, i3, i2])
-            faces.append([i2, i3, i4])
         
         self.vertices = np.array(vertices, dtype=np.float32)
         self.faces = np.array(faces, dtype=np.int32)

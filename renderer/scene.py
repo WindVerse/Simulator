@@ -378,7 +378,7 @@ class Scene:
         Add an object to the scene.
         
         Args:
-            object_type: Type of object (tree, flag, cloth, pole)
+            object_type: Type of object (flag)
             position: World position
             obj_path: Optional path to OBJ file
             

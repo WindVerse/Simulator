@@ -5,7 +5,7 @@ An interactive 3D wind visualization tool with ML-based mesh deformation.
 ## Features
 
 - **OpenFOAM Sample Case Auto-Loaded**: Bundled `wind_data/sample_openfoam_output/` (a full OpenFOAM case) is loaded in the background on startup. Wind comes from `postProcessing/surfaces/`, patch metadata from `constant/polyMesh/boundary`, and static building geometry from `constant/triSurface/*.stl`. Pick **File → Load OpenFOAM Output…** to point at a different case root.
-- **Drag-and-Drop Object Placement**: Place trees, flags, cloth, and poles into the 3D scene
+- **Drag-and-Drop Object Placement**: Place flags into the 3D scene
 - **Real-Time Wind Visualization**: View animated wind velocity vectors in the 3D space
 - **ML-Based Deformation**: PyTorch neural network predicts mesh vertex displacements
 - **GPU Acceleration**: Automatic GPU usage when available
@@ -34,10 +34,7 @@ project/
 ├── objects/               # Mesh representations
 │   ├── __init__.py
 │   ├── object_mesh.py     # Mesh handling class
-│   ├── tree.obj           # Sample tree mesh
-│   ├── flag.obj           # Sample flag mesh
-│   ├── cloth.obj          # Sample cloth mesh
-│   └── pole.obj           # Sample pole mesh
+│   └── flag.obj           # Sample flag mesh
 ├── wind_data/             # Wind field data
 │   ├── __init__.py
 │   ├── wind_field.py      # 5D wind field class (component, z, y, x, time)
@@ -139,10 +136,7 @@ If you prefer to use your own Python installation:
 
 ### Object Types
 
-- **Tree**: Trunk and foliage, base is fixed (rooted)
 - **Flag**: Rectangular cloth attached to a pole edge
-- **Cloth**: Square cloth with fixed corners
-- **Pole**: Rigid cylinder (no deformation)
 
 ## Technical Details
 
