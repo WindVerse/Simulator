@@ -62,6 +62,7 @@ class WindField:
         # Streaming (large-case) backing store; None for eager in-RAM data.
         self._source = None
         self._coarse_points_cache: Optional[np.ndarray] = None
+        self._coarse_disp_points: dict = {}  # xy_stride -> cached display points
 
         self._set_default_coords()
 
@@ -164,6 +165,7 @@ class WindField:
         self.current_time = 0
         self._grid_points_cache = None
         self._coarse_points_cache = None
+        self._coarse_disp_points = {}
 
     def load_from_openfoam_folder(self, base_dir: str):
         """
@@ -430,6 +432,35 @@ class WindField:
         current = self.data[:, :, :, :, self.current_time]
         velocities = np.transpose(current, (3, 2, 1, 0)).reshape(-1, 3)
         return velocities.copy()
+
+    def coarse_display_grid(self, xy_stride: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Global display tier (streaming): coarse field thinned by ``xy_stride``.
+
+        The 5 m coarse cache is far denser than a wide view can resolve, so the
+        global vector field is thinned in X and Y (Z kept full) to bound the arrow
+        count and keep playback smooth. Returns (points (M,3), velocities (M,3))
+        in get_grid_points order. Points are cached per stride; velocities follow
+        ``current_time``. Falls back to the eager arrays when not streaming.
+        """
+        if self._source is None:
+            return self.get_grid_points(), self.get_current_velocities()
+
+        s = max(1, int(xy_stride))
+        src = self._source
+        points = self._coarse_disp_points.get(s)
+        if points is None:
+            xs, ys, zs = src.xc[::s], src.yc[::s], src.zc
+            X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+            points = np.ascontiguousarray(
+                np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1), dtype=np.float32
+            )
+            self._coarse_disp_points[s] = points
+
+        cur = src.coarse[self.current_time % self.time_steps][:, :, ::s, ::s]
+        vels = np.ascontiguousarray(
+            np.transpose(cur, (3, 2, 1, 0)).reshape(-1, 3), dtype=np.float32
+        )
+        return points, vels
 
     def get_box_grid(
         self, center: np.ndarray, half_extent_m: float

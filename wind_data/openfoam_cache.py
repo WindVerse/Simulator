@@ -462,7 +462,12 @@ class OpenFOAMStreamingSource:
             _field_path(cache_dir), dtype=np.float16, mode="r", shape=(T, C, Z, Y, X)
         )
         # Coarse field is small enough to hold resident for instant playback.
-        self.coarse = np.load(_coarse_path(cache_dir))  # (3, Zc, Yc, Xc, T) f32
+        # Stored on disk as (3, Zc, Yc, Xc, T); reorder to time-first so a single
+        # timestep is contiguous in RAM (slicing the time-last layout gathers ~200k
+        # elements strided across 2.6 GB per frame — a major per-frame cost).
+        raw = np.load(_coarse_path(cache_dir))           # (3, Zc, Yc, Xc, T) f32
+        self.coarse = np.ascontiguousarray(np.moveaxis(raw, -1, 0))  # (T, 3, Zc, Yc, Xc)
+        del raw
 
     @property
     def time_steps(self) -> int:
@@ -473,8 +478,7 @@ class OpenFOAMStreamingSource:
 
     def coarse_velocities(self, t: int) -> np.ndarray:
         """(N, 3) coarse velocities aligned with the coarse meshgrid point order."""
-        t = int(t) % self.shape[0]
-        cur = self.coarse[:, :, :, :, t]                 # (3, Zc, Yc, Xc)
+        cur = self.coarse[int(t) % self.shape[0]]        # (3, Zc, Yc, Xc) contiguous
         return np.transpose(cur, (3, 2, 1, 0)).reshape(-1, 3).copy()
 
     def velocity_at_grid(self, t: int, z: int, y: int, x: int) -> np.ndarray:

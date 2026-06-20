@@ -7,6 +7,7 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 import sys
 import os
+import math
 import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app_paths
@@ -347,6 +348,9 @@ class Scene:
         self.wind_coarse_spacing_m = 5.0       # global field spacing (matches cache)
         self.wind_fine_box_m = 12.0            # half-extent of the per-object patch
         self.wind_fine_patch_enabled = True
+        # Cap the global arrow count so the per-frame draw stays cheap on the dense
+        # grid (the field is thinned in X/Y to fit). ~60k -> 10 m on F:\Output\run.
+        self.wind_global_max_arrows = 60000
 
         # Shared wind-vector geometry cache. Built once per state change and
         # reused by every viewport (see get_wind_geometry).
@@ -382,21 +386,15 @@ class Scene:
         if wf is None:
             return None
 
-        points = wf.get_grid_points()
-        velocities = wf.get_current_velocities()
-
-        n = len(points)
-        if n == 0 or len(velocities) != n:
-            return None
-
-        stride = max(1, int(getattr(self, "wind_downsample_stride", 1)))
+        flat_stride = max(1, int(getattr(self, "wind_downsample_stride", 1)))
         scale = float(getattr(self, "wind_vector_scale", 0.3))
         mode = getattr(self, "wind_display_mode", "resultant")
         color_by_speed = bool(getattr(self, "wind_color_by_speed", True))
 
-        # A full-resolution patch around each object is only added for large
-        # (streaming) cases in resultant mode; the global field is coarse there.
+        # The dense (streaming) global field is thinned in X/Y to an arrow budget;
+        # a full-resolution patch around each object adds local detail back.
         streaming = bool(getattr(wf, "is_streaming", False))
+        global_stride = self._global_display_stride(wf) if streaming else 1
         fine_box = float(getattr(self, "wind_fine_box_m", 12.0))
         fine_enabled = (
             streaming and mode == "resultant"
@@ -409,12 +407,27 @@ class Scene:
         )
 
         cache_key = (
-            id(points), wf.current_time, stride, scale, mode, id(wf.data),
-            color_by_speed, streaming, fine_enabled, fine_box, obj_key,
+            wf.current_time, flat_stride, global_stride, scale, mode, color_by_speed,
+            streaming, fine_enabled, fine_box, obj_key,
+            id(wf.data) if not streaming else id(getattr(wf, "_source", None)),
         )
         if cache_key != self._wind_geom_cache_key:
+            # Fetch (and thus copy) velocities only on an actual rebuild, so plain
+            # repaints (pan/zoom, sibling viewports) cost nothing here.
+            if streaming:
+                points, velocities = wf.coarse_display_grid(global_stride)
+            else:
+                points = wf.get_grid_points()
+                velocities = wf.get_current_velocities()
+
+            n = len(points)
+            if n == 0 or len(velocities) != n:
+                self._wind_geom_cache = None
+                self._wind_geom_cache_key = cache_key
+                return None
+
             geom = build_wind_geometry(
-                points, velocities, stride, scale, mode, color_by_speed
+                points, velocities, flat_stride, scale, mode, color_by_speed
             )
             if fine_enabled and centers:
                 geom = self._append_fine_patches(geom, centers, fine_box, scale,
@@ -423,6 +436,19 @@ class Scene:
             self._wind_geom_cache_key = cache_key
 
         return self._wind_geom_cache
+
+    def _global_display_stride(self, wf) -> int:
+        """X/Y stride over the coarse grid so the global arrow count stays within
+        ``wind_global_max_arrows`` (keeps the per-frame draw cheap on dense data)."""
+        src = getattr(wf, "_source", None)
+        if src is None:
+            return 1
+        Xc, Yc, Zc = len(src.xc), len(src.yc), len(src.zc)
+        budget = max(1000, int(getattr(self, "wind_global_max_arrows", 60000)))
+        s = 1
+        while s < 64 and math.ceil(Yc / s) * math.ceil(Xc / s) * Zc > budget:
+            s += 1
+        return s
 
     def _fine_patch_centers(self) -> List[np.ndarray]:
         """World-space centers used to anchor full-resolution wind patches."""
