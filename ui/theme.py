@@ -295,6 +295,13 @@ def build_stylesheet() -> str:
         padding: 0px;
     }}
 
+    /* ---- Floating object card (overlay over the viewport) ---- */
+    QWidget#overlayCard {{
+        background-color: {PANEL};
+        border: 1px solid {BORDER_LIGHT};
+        border-radius: 12px;
+    }}
+
     /* ---- Check boxes ---- */
     QCheckBox {{
         spacing: 8px;

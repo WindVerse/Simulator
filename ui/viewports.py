@@ -101,6 +101,7 @@ class ViewportContainer(QWidget):
         super().__init__(parent)
         self.scene = scene
         self._mode = "single"
+        self._overlay = None  # optional floating widget pinned over the views
 
         # Pane 0 uses the scene's shared camera (the primary view that save/load
         # round-trips); the others get their own camera with a default preset.
@@ -161,6 +162,28 @@ class ViewportContainer(QWidget):
 
         self._set_active(self.panes[0].gl)
         self.refresh()
+        self._reposition_overlay()
+
+    # -- overlay -----------------------------------------------------------
+    def set_overlay(self, widget: QWidget):
+        """Pin a floating widget over the viewports' top-left corner."""
+        self._overlay = widget
+        widget.setParent(self)
+        widget.show()
+        self._reposition_overlay()
+
+    def _reposition_overlay(self):
+        """Tuck the overlay just below the top-left pane's header, on top."""
+        if self._overlay is None:
+            return
+        header_h = 26  # matches ViewportPane's header height
+        margin = 14
+        self._overlay.move(margin, header_h + margin)
+        self._overlay.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_overlay()
 
     def _visible_panes(self):
         if self._mode == "single":

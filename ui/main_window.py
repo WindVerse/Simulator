@@ -317,15 +317,11 @@ class MainWindow(QMainWindow):
         # Primary viewport kept for back-compat (save/load camera, focus default).
         self.gl_widget = self.viewports.primary
         
-        # Left dock - Object Library
+        # Object library: a compact card floating over the viewport's top-left
+        # corner (no left dock — a single flag does not need a full panel).
         self.object_library = ObjectLibraryPanel()
-        left_dock = QDockWidget("Objects", self)
-        left_dock.setWidget(self.object_library)
-        left_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
-        )
-        self.addDockWidget(Qt.LeftDockWidgetArea, left_dock)
-        
+        self.viewports.set_overlay(self.object_library)
+
         # Right dock - Controls
         self.control_panel = ControlPanel(self.sim_controller)
         right_dock = QDockWidget("Controls", self)
