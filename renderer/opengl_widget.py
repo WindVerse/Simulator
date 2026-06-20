@@ -40,19 +40,24 @@ class OpenGLWidget(QOpenGLWidget):
     object_dropped = pyqtSignal(str, float, float, float)
     object_selected = pyqtSignal(object)
     cursor_world_moved = pyqtSignal(float, float, float)
-    
-    def __init__(self, scene: Scene, parent=None):
+    viewport_activated = pyqtSignal()  # this viewport received interaction
+
+    def __init__(self, scene: Scene, camera=None, parent=None):
         """
         Initialize the OpenGL widget.
-        
+
         Args:
             scene: The Scene instance to render
+            camera: The Camera this viewport renders through. Defaults to the
+                scene's shared camera (single-viewport / back-compat).
             parent: Parent widget
         """
         super().__init__(parent)
-        
+
         self.scene = scene
-        
+        # Each viewport renders the shared scene through its own camera.
+        self.camera = camera if camera is not None else scene.camera
+
         # Mouse interaction state
         self._last_mouse_pos: Optional[QPoint] = None
         self._mouse_button: Optional[int] = None
@@ -128,7 +133,7 @@ class OpenGLWidget(QOpenGLWidget):
     def resizeGL(self, width: int, height: int):
         """Handle widget resize."""
         glViewport(0, 0, width, height)
-        self.scene.camera.aspect = width / max(height, 1)
+        self.camera.aspect = width / max(height, 1)
     
     def paintGL(self):
         """Render the scene."""
@@ -150,22 +155,24 @@ class OpenGLWidget(QOpenGLWidget):
     
     def _apply_camera_matrices(self):
         """Apply the current camera projection and view matrices."""
+        cam = self.camera
+
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(
-            self.scene.camera.fov,
-            self.scene.camera.aspect,
-            self.scene.camera.near,
-            self.scene.camera.far
-        )
-        
+        if cam.projection == "orthographic":
+            half_h = cam.ortho_half_height()
+            half_w = half_h * cam.aspect
+            glOrtho(-half_w, half_w, -half_h, half_h, cam.near, cam.far)
+        else:
+            gluPerspective(cam.fov, cam.aspect, cam.near, cam.far)
+
         # Set up view matrix
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         gluLookAt(
-            *self.scene.camera.position,
-            *self.scene.camera.target,
-            *self.scene.camera.up
+            *cam.position,
+            *cam.target,
+            *cam.up
         )
     
     def _draw_ground(self):
@@ -580,7 +587,8 @@ class OpenGLWidget(QOpenGLWidget):
         """Handle mouse press."""
         self._last_mouse_pos = event.pos()
         self._mouse_button = event.button()
-        
+        self.viewport_activated.emit()
+
         if event.button() == Qt.LeftButton and not self._pending_drop_type:
             # Try to select an object or start dragging it
             world_pos = self._screen_to_world_current(event.x(), event.y())
@@ -669,19 +677,19 @@ class OpenGLWidget(QOpenGLWidget):
                     self.scene.move_object(self._dragged_object, new_pos)
                     self.update()
         elif self._mouse_button == Qt.RightButton:
-            # Orbit camera
+            # Orbit camera (no-op for angle-locked orthographic presets)
             self._cancel_focus_animation()
-            self.scene.camera.orbit(dx * 0.5, -dy * 0.5)
+            self.camera.orbit(dx * 0.5, -dy * 0.5)
             self.update()
         elif self._mouse_button == Qt.MiddleButton:
             # Pan camera
             self._cancel_focus_animation()
-            self.scene.camera.pan(-dx * 0.02, dy * 0.02)
+            self.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         elif self._mouse_button == Qt.LeftButton and not self._dragged_object:
             # Pan camera on left button click on empty grid
             self._cancel_focus_animation()
-            self.scene.camera.pan(-dx * 0.02, dy * 0.02)
+            self.camera.pan(-dx * 0.02, dy * 0.02)
             self.update()
         
         self._last_mouse_pos = event.pos()
@@ -709,7 +717,7 @@ class OpenGLWidget(QOpenGLWidget):
         """Handle mouse wheel for zoom."""
         self._cancel_focus_animation()
         delta = event.angleDelta().y() / 120.0
-        self.scene.camera.zoom(delta)
+        self.camera.zoom(delta)
         self.update()
     
     def _screen_to_world(
@@ -780,15 +788,27 @@ class OpenGLWidget(QOpenGLWidget):
         self.setCursor(Qt.ArrowCursor)
 
     def start_focus_on_object(self, mesh: ObjectMesh):
-        """Begin a smooth camera dolly-in centered on the given mesh."""
+        """Center this viewport on the given mesh.
+
+        Free perspective views animate a smooth dolly-in; angle-locked
+        orthographic presets just recenter (no rotation).
+        """
         if mesh is None:
             return
         center = mesh.get_center()
+
+        if self.camera.locked:
+            # Keep the fixed preset angle; recenter on the object.
+            self.camera.target = np.asarray(center, dtype=np.float32).reshape(3).copy()
+            self.camera._update_position()
+            self.update()
+            return
+
         min_c, max_c = mesh.get_bounding_box()
         radius = float(np.linalg.norm(max_c - min_c) * 0.5)
         if not np.isfinite(radius) or radius <= 0.0:
             radius = 1.0
-        self.scene.camera.focus_on(center, radius=radius)
+        self.camera.focus_on(center, radius=radius)
         self._focus_anim_elapsed.restart()
         self._focus_anim_timer.start()
 
@@ -796,12 +816,12 @@ class OpenGLWidget(QOpenGLWidget):
         """Cancel a running focus animation (no-op if not active)."""
         if self._focus_anim_timer.isActive():
             self._focus_anim_timer.stop()
-        self.scene.camera.cancel_focus_animation()
+        self.camera.cancel_focus_animation()
 
     def _on_focus_anim_tick(self):
         """Per-frame tick that advances the camera focus animation."""
         dt = self._focus_anim_elapsed.restart() / 1000.0
-        still_animating = self.scene.camera.tick_focus_animation(dt)
+        still_animating = self.camera.tick_focus_animation(dt)
         self.update()
         if not still_animating:
             self._focus_anim_timer.stop()

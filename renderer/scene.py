@@ -50,6 +50,13 @@ class Camera:
         self.far = 1000.0
         self.aspect = 1.0
 
+        # View preset state. Free perspective by default; orthographic presets
+        # (top/front/right) lock the viewing angle so only pan/zoom apply.
+        self.projection = "perspective"  # "perspective" | "orthographic"
+        self.locked = False              # True => orbit disabled (fixed angle)
+        self._view_dir = np.array([0.0, 0.0, 1.0], dtype=np.float32)  # target -> camera
+        self._view_up = self.up.copy()
+
         # Focus-animation state
         self._anim_active = False
         self._anim_t = 0.0
@@ -67,6 +74,11 @@ class Camera:
     
     def _update_position(self):
         """Update camera position based on orbit parameters (Z-up world)."""
+        if self.locked:
+            # Fixed viewing direction (orthographic presets); zoom/pan only.
+            self.position = self.target + self._view_dir * self.distance
+            return
+
         azimuth_rad = np.radians(self.azimuth)
         elevation_rad = np.radians(self.elevation)
 
@@ -77,15 +89,61 @@ class Camera:
         z = self.distance * np.sin(elevation_rad)
 
         self.position = self.target + np.array([x, y, z])
-    
+
+    def apply_preset(self, name: str):
+        """
+        Switch this camera to a named view preset.
+
+        Args:
+            name: "perspective" | "top" | "front" | "right"
+                  "perspective" is a free-orbit perspective camera; the others
+                  are angle-locked orthographic views (pan + zoom only).
+        """
+        name = (name or "perspective").lower()
+
+        # target -> camera direction and up vector for each locked preset (Z-up world).
+        ortho_presets = {
+            "top":   (np.array([0.0, 0.0, 1.0], dtype=np.float32),
+                      np.array([0.0, 1.0, 0.0], dtype=np.float32)),
+            "front": (np.array([0.0, -1.0, 0.0], dtype=np.float32),
+                      np.array([0.0, 0.0, 1.0], dtype=np.float32)),
+            "right": (np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                      np.array([0.0, 0.0, 1.0], dtype=np.float32)),
+        }
+
+        if name in ortho_presets:
+            view_dir, view_up = ortho_presets[name]
+            self.projection = "orthographic"
+            self.locked = True
+            self._view_dir = view_dir
+            self._view_up = view_up.copy()
+            self.up = view_up.copy()
+            self._anim_active = False
+            self._update_position()
+        else:
+            # Free perspective: restore the default inspect angle.
+            self.projection = "perspective"
+            self.locked = False
+            self.up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            self.reset()
+
+    def ortho_half_height(self) -> float:
+        """Half-height of the orthographic view volume (world units).
+
+        Tied to ``distance`` so the existing zoom control scales the ortho view.
+        """
+        return max(0.01, float(self.distance) * 0.5)
+
     def orbit(self, delta_azimuth: float, delta_elevation: float):
         """
         Orbit the camera around the target.
-        
+
         Args:
             delta_azimuth: Change in horizontal angle
             delta_elevation: Change in vertical angle
         """
+        if self.locked:
+            return  # Presets keep a fixed viewing angle.
         self.azimuth += delta_azimuth
         self.elevation = np.clip(self.elevation + delta_elevation, -89.0, 89.0)
         self._update_position()
@@ -168,11 +226,14 @@ class Camera:
         return proj
     
     def reset(self):
-        """Reset camera to default position."""
+        """Reset camera to the default free perspective view."""
         self.distance = _DEFAULT_DISTANCE
         self.azimuth = _DEFAULT_AZIMUTH
         self.elevation = _DEFAULT_ELEVATION
         self.target = _DEFAULT_TARGET.copy()
+        self.projection = "perspective"
+        self.locked = False
+        self.up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         self._anim_active = False
         self._update_position()
 

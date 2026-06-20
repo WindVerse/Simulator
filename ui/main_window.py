@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QToolBar, QAction, QStatusBar, QLabel,
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
     QFrame, QGroupBox, QCheckBox, QPushButton,
-    QRadioButton, QButtonGroup, QSpinBox
+    QRadioButton, QButtonGroup, QSpinBox, QActionGroup
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
 from renderer.opengl_widget import OpenGLWidget
+from ui.viewports import ViewportContainer
 from renderer.wind_colormap import BEAUFORT_BANDS
 from wind_data.wind_field import WindField
 from wind_data.openfoam_loader import extract_openfoam_case
@@ -273,9 +274,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # OpenGL viewport
-        self.gl_widget = OpenGLWidget(self.scene)
-        layout.addWidget(self.gl_widget, stretch=1)
+        # 3D viewports (Single / Dual / Quad), all rendering the shared scene.
+        self.viewports = ViewportContainer(self.scene)
+        layout.addWidget(self.viewports, stretch=1)
+        # Primary viewport kept for back-compat (save/load camera, focus default).
+        self.gl_widget = self.viewports.primary
         
         # Left dock - Object Library
         self.object_library = ObjectLibraryPanel()
@@ -353,7 +356,28 @@ class MainWindow(QMainWindow):
         camera_action.setShortcut(QKeySequence("C"))
         camera_action.triggered.connect(self._reset_camera)
         toolbar.addAction(camera_action)
-    
+
+        toolbar.addSeparator()
+
+        # Viewport layout: Single / Dual / Quad (mutually exclusive)
+        self.layout_group = QActionGroup(self)
+        self.layout_group.setExclusive(True)
+
+        self.layout_single_action = self._make_layout_action("Single", "single", checked=True)
+        self.layout_dual_action = self._make_layout_action("Dual", "dual")
+        self.layout_quad_action = self._make_layout_action("Quad", "quad")
+        for act in (self.layout_single_action, self.layout_dual_action, self.layout_quad_action):
+            toolbar.addAction(act)
+
+    def _make_layout_action(self, label: str, mode: str, checked: bool = False) -> QAction:
+        """Create a checkable, exclusive viewport-layout action."""
+        action = QAction(label, self)
+        action.setCheckable(True)
+        action.setChecked(checked)
+        action.triggered.connect(lambda _=False, m=mode: self.viewports.set_layout(m))
+        self.layout_group.addAction(action)
+        return action
+
     def _create_status_bar(self):
         """Create the status bar."""
         self.status_bar = QStatusBar()
@@ -401,7 +425,14 @@ class MainWindow(QMainWindow):
         
         # View menu
         view_menu = menubar.addMenu("&View")
-        
+
+        layout_menu = view_menu.addMenu("&Layout")
+        layout_menu.addAction(self.layout_single_action)
+        layout_menu.addAction(self.layout_dual_action)
+        layout_menu.addAction(self.layout_quad_action)
+
+        view_menu.addSeparator()
+
         reset_camera_action = QAction("Reset &Camera", self)
         reset_camera_action.triggered.connect(self._reset_camera)
         view_menu.addAction(reset_camera_action)
@@ -415,19 +446,19 @@ class MainWindow(QMainWindow):
     
     def _setup_connections(self):
         """Set up signal connections."""
-        # Object library selection
+        # Object library selection (arm a pending drop on every visible viewport)
         self.object_library.object_selected.connect(
-            self.gl_widget.set_pending_drop
+            self.viewports.set_pending_drop
         )
-        
+
         # Object drop
-        self.gl_widget.object_dropped.connect(self._add_object)
-        
+        self.viewports.object_dropped.connect(self._add_object)
+
         # Object selection
-        self.gl_widget.object_selected.connect(self._on_object_selected)
-        
+        self.viewports.object_selected.connect(self._on_object_selected)
+
         # Viewport hover coordinates
-        self.gl_widget.cursor_world_moved.connect(self._on_cursor_world_moved)
+        self.viewports.cursor_world_moved.connect(self._on_cursor_world_moved)
         
         # Simulation updates
         self.sim_controller.simulation_updated.connect(self._on_simulation_update)
@@ -480,8 +511,9 @@ class MainWindow(QMainWindow):
             
         self.object_library.update_object_count(len(self.scene.objects))
         self.status_label.setText(f"Added {object_type} at ({x:.1f}, {y:.1f}, {z:.1f})")
-        self.gl_widget.update()
-        self.gl_widget.start_focus_on_object(mesh)
+        self.viewports.refresh()
+        # Frame the new object in the viewport the user dropped into.
+        self.viewports.active_view.start_focus_on_object(mesh)
     
     def _on_object_selected(self, obj):
         """Handle object selection."""
@@ -500,7 +532,7 @@ class MainWindow(QMainWindow):
     
     def _on_simulation_update(self):
         """Handle simulation update."""
-        self.gl_widget.update()
+        self.viewports.refresh()
     
     def _update_ui(self):
         """Update UI elements."""
@@ -518,17 +550,17 @@ class MainWindow(QMainWindow):
         self.sim_controller.reset()
         self.play_action.setChecked(False)
         self.control_panel.play_btn.setChecked(False)
-        self.gl_widget.update()
+        self.viewports.refresh()
     
     def _toggle_grid(self, visible: bool):
         """Toggle grid visibility."""
         self.scene.grid_visible = visible
-        self.gl_widget.update()
+        self.viewports.refresh()
     
     def _toggle_wind(self, visible: bool):
         """Toggle wind vector visibility."""
         self.scene.wind_vectors_visible = visible
-        self.gl_widget.update()
+        self.viewports.refresh()
 
     def _on_wind_mode_changed(self, _checked: bool):
         """Switch between resultant and component vector rendering."""
@@ -537,18 +569,18 @@ class MainWindow(QMainWindow):
             else "components"
         )
         self._refresh_legend_state()
-        self.gl_widget.update()
+        self.viewports.refresh()
 
     def _on_wind_stride_changed(self, value: int):
         """Update wind vector downsampling stride."""
         self.scene.wind_downsample_stride = max(1, int(value))
-        self.gl_widget.update()
+        self.viewports.refresh()
 
     def _on_wind_color_changed(self, checked: bool):
         """Toggle the Beaufort speed colormap for resultant arrows."""
         self.scene.wind_color_by_speed = bool(checked)
         self._refresh_legend_state()
-        self.gl_widget.update()
+        self.viewports.refresh()
 
     def _refresh_legend_state(self):
         """Gray out the legend when the colormap isn't actually applied."""
@@ -561,7 +593,7 @@ class MainWindow(QMainWindow):
     def _toggle_environment(self, visible: bool):
         """Toggle environment (static STL) mesh visibility."""
         self.scene.environment_visible = visible
-        self.gl_widget.update()
+        self.viewports.refresh()
     
     def _clear_scene(self):
         """Clear all objects from the scene."""
@@ -576,13 +608,12 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self.scene.clear_objects()
             self.object_library.update_object_count(0)
-            self.gl_widget.update()
+            self.viewports.refresh()
             self.status_label.setText("Scene cleared")
     
     def _reset_camera(self):
-        """Reset camera to default position."""
-        self.scene.camera.reset()
-        self.gl_widget.update()
+        """Reset the focused viewport to the default free perspective view."""
+        self.viewports.reset_active_camera()
     
     def _save_scene(self):
         """Save the current scene to file."""
@@ -613,7 +644,7 @@ class MainWindow(QMainWindow):
                 data = json.load(f)
             self.scene.deserialize(data)
             self.object_library.update_object_count(len(self.scene.objects))
-            self.gl_widget.update()
+            self.viewports.refresh()
             self.status_label.setText(f"Scene loaded from {filepath}")
 
     def _load_default_case_async(self):
@@ -703,7 +734,7 @@ class MainWindow(QMainWindow):
 
         self._fit_grid_to_wind_field()
         self.status_label.setText(self._format_case_status(result))
-        self.gl_widget.update()
+        self.viewports.refresh()
 
     def _format_case_status(self, result: dict) -> str:
         """Compose the status-bar summary for a loaded case."""

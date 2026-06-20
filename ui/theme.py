@@ -443,6 +443,73 @@ def build_stylesheet() -> str:
         background: none;
     }}
 
+    /* ---- Combo boxes ---- */
+    QComboBox {{
+        background-color: {ELEVATED};
+        color: {TEXT};
+        border: 1px solid {BORDER_LIGHT};
+        border-radius: 5px;
+        padding: 2px 8px;
+        min-height: 20px;
+    }}
+    QComboBox:hover {{
+        border-color: {ACCENT};
+    }}
+    QComboBox:focus {{
+        border-color: {ACCENT};
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        width: 18px;
+        border: none;
+    }}
+    QComboBox::down-arrow {{
+        image: none;
+        width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {TEXT};
+        margin-right: 6px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {PANEL};
+        color: {TEXT};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        selection-background-color: {ELEVATED};
+        selection-color: {ACCENT};
+        outline: none;
+        padding: 2px;
+    }}
+
+    /* ---- Viewport panes ---- */
+    QWidget#viewportPane {{
+        background-color: {BG};
+        border: 2px solid transparent;
+        border-radius: 4px;
+    }}
+    QWidget#viewportPane[active="true"] {{
+        border: 2px solid {ACCENT};
+    }}
+    QFrame#viewportHeader {{
+        background-color: {PANEL};
+        border-bottom: 1px solid {BORDER};
+    }}
+    QLabel#viewportTitle {{
+        color: {TEXT_MUTED};
+        font-weight: bold;
+        font-size: 9pt;
+        letter-spacing: 1px;
+        background: transparent;
+    }}
+    QComboBox#viewportPreset {{
+        font-size: 9pt;
+        padding: 1px 6px;
+        min-height: 18px;
+        max-height: 20px;
+    }}
+
     /* ---- Message box / dialog buttons ---- */
     QMessageBox {{
         background-color: {PANEL};
