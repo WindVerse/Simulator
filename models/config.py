@@ -53,6 +53,7 @@ if IS_TEST:
 else:
     ITERATION_COUNT = 100
 FPS = 10
+GRID_SPACING = 1.0                     # Ground reference grid: meters per square
 NO_DIGITS = 3
 if IS_TEST:
     MAX_FRAMES = 30

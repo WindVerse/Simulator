@@ -194,28 +194,17 @@ class OpenGLWidget(QOpenGLWidget):
         glDisable(GL_LIGHTING)
         glLineWidth(1.0)
 
-        half_size = self.scene.grid_size // 2
-        spacing = self.scene.grid_spacing
-        center_x, center_y = self.scene.grid_center
-        extent = half_size * spacing
-
+        # Grid lines come from the scene's shared, cached vertex array so a fine
+        # 1 m grid over a large field is one glDrawArrays per viewport (no Python
+        # per-line loop). Rebuilt only when the grid extent/spacing/center changes.
+        verts = self.scene.get_grid_geometry()
         glColor4f(*self._grid_color)
-        glBegin(GL_LINES)
-
-        # Draw grid lines on the X/Y horizontal plane
-        for i in range(-half_size, half_size + 1):
-            x = center_x + i * spacing
-            y = center_y + i * spacing
-
-            # Lines parallel to Y at constant X
-            glVertex3f(x, center_y - extent, 0)
-            glVertex3f(x, center_y + extent, 0)
-
-            # Lines parallel to X at constant Y
-            glVertex3f(center_x - extent, y, 0)
-            glVertex3f(center_x + extent, y, 0)
-
-        glEnd()
+        glEnableClientState(GL_VERTEX_ARRAY)
+        try:
+            glVertexPointer(3, GL_FLOAT, 0, verts)
+            glDrawArrays(GL_LINES, 0, len(verts))
+        finally:
+            glDisableClientState(GL_VERTEX_ARRAY)
 
         # Draw highlighted grid cell under cursor
         self._draw_hovered_grid_cell()

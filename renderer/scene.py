@@ -348,8 +348,14 @@ class Scene:
 
         # Grid settings
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
-        self.grid_spacing = 1.0
+        self.grid_spacing = cfg.GRID_SPACING
         self.grid_center = (0.0, 0.0)
+
+        # Shared ground-grid line geometry cache. Rebuilt only when the grid
+        # extent/spacing/center changes; reused by every viewport so a fine 1 m
+        # grid over a large field is a single glDrawArrays per viewport.
+        self._grid_geom_cache = None
+        self._grid_geom_cache_key = None
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -398,6 +404,43 @@ class Scene:
             self._wind_geom_cache_key = cache_key
 
         return self._wind_geom_cache
+
+    def get_grid_geometry(self) -> np.ndarray:
+        """Return the ground-grid line vertices for the current grid, cached.
+
+        Builds a flat (N, 3) float32 array of GL_LINES endpoint pairs covering
+        the whole grid at the current spacing, rebuilt only when the grid
+        extent/spacing/center changes. Drawn with a single glDrawArrays call.
+        """
+        half = self.grid_size // 2
+        spacing = self.grid_spacing
+        center_x, center_y = self.grid_center
+
+        cache_key = (half, spacing, center_x, center_y)
+        if cache_key == self._grid_geom_cache_key and self._grid_geom_cache is not None:
+            return self._grid_geom_cache
+
+        extent = half * spacing
+        coords = (np.arange(-half, half + 1, dtype=np.float32) * spacing)
+        n = coords.size
+
+        verts = np.zeros((4 * n, 3), dtype=np.float32)
+        # Lines parallel to Y at constant X (vertices [0 : 2n))
+        x = center_x + coords
+        verts[0:2 * n:2, 0] = x
+        verts[0:2 * n:2, 1] = center_y - extent
+        verts[1:2 * n:2, 0] = x
+        verts[1:2 * n:2, 1] = center_y + extent
+        # Lines parallel to X at constant Y (vertices [2n : 4n))
+        y = center_y + coords
+        verts[2 * n::2, 0] = center_x - extent
+        verts[2 * n::2, 1] = y
+        verts[2 * n + 1::2, 0] = center_x + extent
+        verts[2 * n + 1::2, 1] = y
+
+        self._grid_geom_cache = verts
+        self._grid_geom_cache_key = cache_key
+        return verts
 
     def _get_default_obj_path(self, object_type: str) -> Optional[str]:
         """Return the bundled OBJ path for a known object type, if present."""

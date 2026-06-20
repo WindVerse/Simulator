@@ -28,6 +28,7 @@ from wind_data.wind_field import WindField
 from wind_data.openfoam_loader import extract_openfoam_case
 from objects.object_mesh import ObjectMesh
 from models.deformation_model import DeformationModel
+from models import config as cfg
 from ui.object_library import ObjectLibraryPanel
 from ui.simulation_controller import SimulationController
 from ui import theme
@@ -771,9 +772,15 @@ class MainWindow(QMainWindow):
         min_x, max_x = float(min_corner[0]), float(max_corner[0])
         min_y, max_y = float(min_corner[1]), float(max_corner[1])
 
-        spacing = self._infer_horizontal_grid_spacing()
-        center_x = (min_x + max_x) / 2.0
-        center_y = (min_y + max_y) / 2.0
+        # Always draw a fixed 1 m display grid, independent of the data's native
+        # resolution. The grid spans the full wind field (works for both the
+        # bundled sample and F:\Output\run) and is anchored to whole-meter
+        # coordinates so lines fall on integer meters where the data points live.
+        # The grid is drawn from a cached vertex array (one glDrawArrays per
+        # viewport), so full 1 m coverage of a large field stays cheap.
+        spacing = cfg.GRID_SPACING
+        center_x = round((min_x + max_x) / 2.0 / spacing) * spacing
+        center_y = round((min_y + max_y) / 2.0 / spacing) * spacing
         half_extent = max((max_x - min_x) / 2.0, (max_y - min_y) / 2.0, spacing)
         half_steps = max(1, int(math.ceil(half_extent / spacing)))
 
@@ -781,28 +788,6 @@ class MainWindow(QMainWindow):
         self.scene.grid_spacing = spacing
         self.scene.grid_size = half_steps * 2
 
-    def _infer_horizontal_grid_spacing(self) -> float:
-        """Infer a display grid spacing from loaded wind X/Y coordinates."""
-        spacing_candidates = []
-
-        for coords in (self.wind_field.x_coords, self.wind_field.y_coords):
-            unique_coords = sorted({float(coord) for coord in coords})
-            diffs = [
-                b - a
-                for a, b in zip(unique_coords, unique_coords[1:])
-                if b - a > 1e-6
-            ]
-            
-            if diffs:
-                diffs.sort()
-                index = min(len(diffs) - 1, int(round((len(diffs) - 1) * 0.75)))
-                spacing_candidates.append(diffs[index])
-        
-        if not spacing_candidates:
-            return max(float(self.scene.grid_spacing), 1.0)
-        
-        return max(min(spacing_candidates), 1e-3)
-    
     def _show_about(self):
         """Show about dialog."""
         QMessageBox.about(
