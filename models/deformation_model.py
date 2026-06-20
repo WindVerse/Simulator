@@ -8,6 +8,7 @@ import os
 import numpy as np
 import torch
 
+import app_paths
 from . import config as cfg
 from .load_model import load_model
 
@@ -53,7 +54,7 @@ class DeformationModel:
 
         # Load model
         self.model = load_model(self.device)
-        model_path = os.path.join(os.path.dirname(__file__), "best_model_1.pth")
+        model_path = app_paths.resource_path("models", "best_model_1.pth")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model not found at {model_path}")
         self.model.load_state_dict(

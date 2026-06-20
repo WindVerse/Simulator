@@ -59,6 +59,10 @@ class WindField:
         self.current_time = 0
         self._grid_points_cache: Optional[np.ndarray] = None
 
+        # Streaming (large-case) backing store; None for eager in-RAM data.
+        self._source = None
+        self._coarse_points_cache: Optional[np.ndarray] = None
+
         self._set_default_coords()
 
         # Shape: (component, z, y, x, time)
@@ -132,7 +136,34 @@ class WindField:
         )
         self.time_steps = len(self.time_coords)
         self.current_time = 0
+        self._source = None
         self._grid_points_cache = None
+        self._coarse_points_cache = None
+
+    @property
+    def is_streaming(self) -> bool:
+        """True when wind is served from a memmapped cache instead of self.data."""
+        return self._source is not None
+
+    def set_streaming_source(self, source):
+        """Back this field with an OpenFOAMStreamingSource (large cached case).
+
+        ``self.data`` is left as None; display sampling uses the source's in-RAM
+        coarse field, while point/position sampling uses its full-res memmap. The
+        coordinate arrays are the full-resolution grid so bounds, ML sampling and
+        the ground grid all see the true domain.
+        """
+        self._source = source
+        self.data = None
+        self.x_coords = np.asarray(source.x_coords, dtype=np.float32)
+        self.y_coords = np.asarray(source.y_coords, dtype=np.float32)
+        self.z_coords = np.asarray(source.z_coords, dtype=np.float32)
+        self.time_coords = np.asarray(source.time_coords, dtype=np.float32)
+        self.grid_size = (len(self.x_coords), len(self.y_coords), len(self.z_coords))
+        self.time_steps = int(source.time_steps)
+        self.current_time = 0
+        self._grid_points_cache = None
+        self._coarse_points_cache = None
 
     def load_from_openfoam_folder(self, base_dir: str):
         """
@@ -244,10 +275,14 @@ class WindField:
         if time is None:
             time = self.current_time
 
-        x = np.clip(x, 0, self.grid_size[0] - 1)
-        y = np.clip(y, 0, self.grid_size[1] - 1)
-        z = np.clip(z, 0, self.grid_size[2] - 1)
+        x = int(np.clip(x, 0, self.grid_size[0] - 1))
+        y = int(np.clip(y, 0, self.grid_size[1] - 1))
+        z = int(np.clip(z, 0, self.grid_size[2] - 1))
         time = time % self.time_steps
+
+        if self._source is not None:
+            # Full-resolution read from the memmapped cache (accurate sampling).
+            return self._source.velocity_at_grid(time, z, y, x)
 
         return self.data[:, z, y, x, time].copy()
 
@@ -359,7 +394,20 @@ class WindField:
         Cached: rebuilt only when the underlying coordinate arrays change
         (set_wind_data / load_from_file / _set_default_coords reset the cache).
         Callers must treat the returned array as read-only.
+
+        In streaming mode this returns the *coarse* display grid (the global
+        vector field is thinned for performance); full-resolution sampling still
+        goes through get_velocity_at_grid / get_box_grid.
         """
+        if self._source is not None:
+            if self._coarse_points_cache is None:
+                X, Y, Z = np.meshgrid(
+                    self._source.xc, self._source.yc, self._source.zc, indexing='ij'
+                )
+                points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+                self._coarse_points_cache = np.ascontiguousarray(points, dtype=np.float32)
+            return self._coarse_points_cache
+
         if self._grid_points_cache is None:
             X, Y, Z = np.meshgrid(
                 self.x_coords, self.y_coords, self.z_coords, indexing='ij'
@@ -370,14 +418,56 @@ class WindField:
 
     def get_current_velocities(self) -> np.ndarray:
         """
-        Get all velocity vectors at the current time step.
+        Get all velocity vectors at the current time step (matches get_grid_points).
 
         Returns:
-            Array of shape (N, 3) with velocity vectors
+            Array of shape (N, 3) with velocity vectors. In streaming mode these
+            are the coarse-field velocities aligned with the coarse grid points.
         """
+        if self._source is not None:
+            return self._source.coarse_velocities(self.current_time)
+
         current = self.data[:, :, :, :, self.current_time]
         velocities = np.transpose(current, (3, 2, 1, 0)).reshape(-1, 3)
         return velocities.copy()
+
+    def get_box_grid(
+        self, center: np.ndarray, half_extent_m: float
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Full-resolution wind in a box around ``center`` at the current time.
+
+        Used to draw a dense "fine patch" of vectors around placed objects on top
+        of the coarse global field. Returns (points (M,3), velocities (M,3)) in the
+        same ordering as get_grid_points. Empty arrays when not streaming or when
+        the box falls outside the domain.
+        """
+        empty = (np.empty((0, 3), np.float32), np.empty((0, 3), np.float32))
+        if self._source is None:
+            return empty
+
+        cx, cy = float(center[0]), float(center[1])
+        x0 = int(np.searchsorted(self.x_coords, cx - half_extent_m, side="left"))
+        x1 = int(np.searchsorted(self.x_coords, cx + half_extent_m, side="right"))
+        y0 = int(np.searchsorted(self.y_coords, cy - half_extent_m, side="left"))
+        y1 = int(np.searchsorted(self.y_coords, cy + half_extent_m, side="right"))
+        x0 = max(0, min(x0, self.grid_size[0]))
+        x1 = max(0, min(x1, self.grid_size[0]))
+        y0 = max(0, min(y0, self.grid_size[1]))
+        y1 = max(0, min(y1, self.grid_size[1]))
+        if x1 <= x0 or y1 <= y0:
+            return empty
+
+        box = self._source.box_at(self.current_time, x0, x1, y0, y1)  # (3,Z,yb,xb)
+        xs = self.x_coords[x0:x1]
+        ys = self.y_coords[y0:y1]
+        zs = self.z_coords
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+        points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        vels = np.transpose(box, (3, 2, 1, 0)).reshape(-1, 3)
+        return (
+            np.ascontiguousarray(points, dtype=np.float32),
+            np.ascontiguousarray(vels, dtype=np.float32),
+        )
 
     def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """

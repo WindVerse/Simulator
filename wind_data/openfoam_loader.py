@@ -411,15 +411,38 @@ def extract_openfoam_case(selected_path: str) -> Dict:
     Returns a dict with keys:
         surfaces_dir: str
         case_root: Optional[str]
-        wind: (data, x_coords, y_coords, z_coords, time_coords)   # required
+        wind_mode: "eager" | "streaming" | "needs_build"
+        wind: (data, x_coords, y_coords, z_coords, time_coords)   # eager only
+        wind_source: OpenFOAMStreamingSource                      # streaming only
         patches: List[{"name": str, "type": str}]                 # may be []
         tri_surfaces: List[{"name", "vertices", "faces", "normals"}]
         warnings: List[str]
+
+    Large cases (dense float32 > STREAMING_THRESHOLD_GB) are not loaded eagerly:
+    if a binary cache exists they are returned as "streaming"; otherwise as
+    "needs_build" so the caller can offer a one-time conversion.
     """
+    from . import openfoam_cache
+
     warnings: List[str] = []
     surfaces_dir, case_root = _resolve_surfaces_dir(selected_path)
 
-    wind = extract_openfoam_wind(surfaces_dir)
+    try:
+        dense_gb = openfoam_cache.estimate_dense_gb(surfaces_dir)
+    except Exception:
+        dense_gb = 0.0
+
+    wind_mode = "eager"
+    wind = None
+    wind_source = None
+    if dense_gb > openfoam_cache.STREAMING_THRESHOLD_GB:
+        if openfoam_cache.is_cached(surfaces_dir):
+            wind_mode = "streaming"
+            wind_source = openfoam_cache.open_source(surfaces_dir)
+        else:
+            wind_mode = "needs_build"
+    else:
+        wind = extract_openfoam_wind(surfaces_dir)
 
     patches: List[Dict[str, str]] = []
     tri_surfaces: List[Dict] = []
@@ -452,7 +475,10 @@ def extract_openfoam_case(selected_path: str) -> Dict:
     return {
         "surfaces_dir": surfaces_dir,
         "case_root": case_root,
+        "wind_mode": wind_mode,
         "wind": wind,
+        "wind_source": wind_source,
+        "dense_gb": dense_gb,
         "patches": patches,
         "tri_surfaces": tri_surfaces,
         "warnings": warnings,

@@ -8,7 +8,8 @@ from PyQt5.QtWidgets import (
     QToolBar, QAction, QStatusBar, QLabel,
     QDockWidget, QMessageBox, QFileDialog, QSplitter,
     QFrame, QGroupBox, QCheckBox, QPushButton,
-    QRadioButton, QButtonGroup, QSpinBox, QActionGroup
+    QRadioButton, QButtonGroup, QSpinBox, QActionGroup,
+    QProgressDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -26,6 +27,8 @@ from ui.viewports import ViewportContainer
 from renderer.wind_colormap import BEAUFORT_BANDS
 from wind_data.wind_field import WindField
 from wind_data.openfoam_loader import extract_openfoam_case
+from wind_data import openfoam_cache
+import app_paths
 from objects.object_mesh import ObjectMesh
 from models.deformation_model import DeformationModel
 from ui.object_library import ObjectLibraryPanel
@@ -50,6 +53,38 @@ class _OpenFOAMCaseLoadWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result)
+
+
+class _OpenFOAMCacheBuildWorker(QThread):
+    """Background thread that converts a large OpenFOAM case into its binary cache.
+
+    Emits progress as a 0-100 percentage so the UI can show a determinate bar.
+    Cooperative cancellation is requested via ``cancel()``.
+    """
+
+    progress = pyqtSignal(int)      # 0-100
+    finished_ok = pyqtSignal(str)   # surfaces_dir that was cached
+    failed = pyqtSignal(str)
+
+    def __init__(self, surfaces_dir: str, parent=None):
+        super().__init__(parent)
+        self._surfaces_dir = surfaces_dir
+        self._canceled = False
+
+    def cancel(self):
+        self._canceled = True
+
+    def run(self):
+        try:
+            openfoam_cache.build_cache(
+                self._surfaces_dir,
+                progress_cb=lambda frac: self.progress.emit(int(frac * 100)),
+                cancel_flag=lambda: self._canceled,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(self._surfaces_dir)
 
 
 class ControlPanel(QWidget):
@@ -228,6 +263,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self._sample_load_worker = None
+        self._cache_build_worker = None
+        self._cache_progress = None
 
         self._setup_components()
         self._setup_ui()
@@ -415,7 +452,11 @@ class MainWindow(QMainWindow):
         load_case_action = QAction("Load OpenFOAM &Output...", self)
         load_case_action.triggered.connect(self._load_openfoam_case)
         file_menu.addAction(load_case_action)
-        
+
+        run_case_action = QAction("Load/Build &F:\\Output\\run", self)
+        run_case_action.triggered.connect(self._load_primary_case)
+        file_menu.addAction(run_case_action)
+
         file_menu.addSeparator()
         
         exit_action = QAction("E&xit", self)
@@ -647,20 +688,39 @@ class MainWindow(QMainWindow):
             self.viewports.refresh()
             self.status_label.setText(f"Scene loaded from {filepath}")
 
+    def _primary_case_path(self) -> str:
+        """The dataset this build is optimized for (overridable via env)."""
+        return os.environ.get("WINDVERSE_OPENFOAM_CASE", r"F:\Output\run")
+
     def _load_default_case_async(self):
-        """Kick off background load of the bundled OpenFOAM sample case."""
-        sample_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..",
-                "wind_data",
-                "sample_openfoam_output",
-            )
-        )
+        """Auto-load the primary case if its cache exists, else the bundled sample.
+
+        Loading happens off the UI thread so the window appears immediately. The
+        large primary case is only auto-loaded when already cached (instant);
+        otherwise we fall back to the sample and leave building to the user.
+        """
+        primary = self._primary_case_path()
+        if os.path.isdir(primary) and openfoam_cache.is_case_cached(primary):
+            self._start_case_load(primary, source_label="F:\\Output\\run")
+            return
+
+        sample_path = app_paths.resource_path("wind_data", "sample_openfoam_output")
         if not os.path.isdir(sample_path):
             return  # No bundled sample; keep demo wind silently.
 
         self._start_case_load(sample_path, source_label="bundled sample")
+
+    def _load_primary_case(self):
+        """Load (or, on first use, offer to build the cache for) the primary case."""
+        primary = self._primary_case_path()
+        if not os.path.isdir(primary):
+            self.status_label.setText(f"Case folder not found: {primary}")
+            return
+        if self.sim_controller.is_running:
+            self.sim_controller.stop()
+            self.play_action.setChecked(False)
+            self.control_panel.play_btn.setChecked(False)
+        self._start_case_load(primary, source_label="F:\\Output\\run")
 
     def _load_openfoam_case(self):
         """Load an OpenFOAM case (or surfaces folder) chosen by the user."""
@@ -698,14 +758,17 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_case_load_finished(self, result: dict):
-        """Apply a parsed OpenFOAM case on the UI thread."""
+        """Apply a parsed OpenFOAM case on the UI thread (or offer to build a cache)."""
+        self._sample_load_worker = None
         try:
+            if result.get("wind_mode") == "needs_build":
+                self._offer_cache_build(result)
+                return
             self._apply_case_result(result)
         finally:
             self.control_panel.play_btn.setEnabled(True)
             if hasattr(self, "play_action"):
                 self.play_action.setEnabled(True)
-            self._sample_load_worker = None
 
     def _on_case_load_failed(self, message: str):
         """Restore controls and surface the error in the status bar."""
@@ -715,10 +778,118 @@ class MainWindow(QMainWindow):
             self.play_action.setEnabled(True)
         self._sample_load_worker = None
 
+    # -- one-time cache build (large cases) -------------------------------------
+    def _offer_cache_build(self, result: dict):
+        """Ask the user to run the one-time conversion for an uncached large case."""
+        surfaces_dir = result.get("surfaces_dir")
+        if not surfaces_dir:
+            self.status_label.setText("Cannot locate surfaces folder to build cache.")
+            return
+        # Reload via the case root (if known) after building, to also pick up
+        # boundary patches and triSurface geometry.
+        self._pending_reload_path = result.get("case_root") or surfaces_dir
+        gb = float(result.get("dense_gb") or 0.0)
+
+        reply = QMessageBox.question(
+            self,
+            "Build wind cache",
+            f"This case is large (~{gb:.0f} GB dense) and needs a one-time "
+            f"conversion into a fast binary cache before it can be visualized "
+            f"smoothly.\n\nThe conversion runs once (tens of minutes) and is "
+            f"reused on every later launch. Build it now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            self.status_label.setText("Cache build skipped; case not loaded.")
+            return
+        self._start_cache_build(surfaces_dir)
+
+    def _start_cache_build(self, surfaces_dir: str):
+        """Spawn the background cache-build worker with a determinate progress bar."""
+        if self._cache_build_worker is not None and self._cache_build_worker.isRunning():
+            return
+
+        # Make sure the cache lands on a drive with room. The default (D:) has
+        # space here; on a space-tight machine (e.g. a bundled exe elsewhere) ask
+        # for a folder and remember it so it persists across reboots / runs.
+        try:
+            need_gb = openfoam_cache.estimated_cache_gb(surfaces_dir)
+        except Exception:
+            need_gb = 0.0
+        root = app_paths.user_cache_root()
+        if need_gb > 0.0 and app_paths.free_space_gb(root) < need_gb:
+            chosen = QFileDialog.getExistingDirectory(
+                self,
+                f"Choose a folder with at least {need_gb:.0f} GB free for the wind cache",
+                "",
+            )
+            if not chosen:
+                self.status_label.setText("Cache build canceled (no location chosen).")
+                return
+            if app_paths.free_space_gb(chosen) < need_gb:
+                QMessageBox.warning(
+                    self, "Not enough space",
+                    f"That drive has only {app_paths.free_space_gb(chosen):.0f} GB free; "
+                    f"~{need_gb:.0f} GB is needed. Build canceled.",
+                )
+                self.status_label.setText("Cache build canceled (insufficient space).")
+                return
+            app_paths.set_cache_root(chosen)
+
+        dlg = QProgressDialog(
+            "Building wind cache (one-time)…", "Cancel", 0, 100, self
+        )
+        dlg.setWindowTitle("Preparing F:\\Output\\run")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        self._cache_progress = dlg
+
+        worker = _OpenFOAMCacheBuildWorker(surfaces_dir, self)
+        worker.progress.connect(self._on_cache_build_progress)
+        worker.finished_ok.connect(self._on_cache_build_finished)
+        worker.failed.connect(self._on_cache_build_failed)
+        worker.finished.connect(worker.deleteLater)
+        dlg.canceled.connect(worker.cancel)
+        self._cache_build_worker = worker
+        self.status_label.setText("Building wind cache (one-time)…")
+        worker.start()
+
+    def _on_cache_build_progress(self, pct: int):
+        if self._cache_progress is not None:
+            self._cache_progress.setValue(int(pct))
+
+    def _close_cache_progress(self):
+        if self._cache_progress is not None:
+            self._cache_progress.reset()
+            self._cache_progress = None
+
+    def _on_cache_build_finished(self, surfaces_dir: str):
+        self._cache_build_worker = None
+        self._close_cache_progress()
+        self.status_label.setText("Wind cache built; loading…")
+        reload_path = getattr(self, "_pending_reload_path", None) or surfaces_dir
+        self._start_case_load(reload_path, source_label="F:\\Output\\run")
+
+    def _on_cache_build_failed(self, message: str):
+        self._cache_build_worker = None
+        self._close_cache_progress()
+        # Cancellation also arrives here (build raises) - report either way.
+        self.status_label.setText(f"Wind cache build stopped: {message}")
+
     def _apply_case_result(self, result: dict):
         """Apply wind + patches + triSurface geometry from a loaded case."""
-        wind_data, x_coords, y_coords, z_coords, time_coords = result["wind"]
-        self.wind_field.set_wind_data(wind_data, x_coords, y_coords, z_coords, time_coords)
+        if result.get("wind_mode") == "streaming":
+            # Large case served from the binary cache (no dense array in RAM).
+            self.wind_field.set_streaming_source(result["wind_source"])
+        else:
+            wind_data, x_coords, y_coords, z_coords, time_coords = result["wind"]
+            self.wind_field.set_wind_data(
+                wind_data, x_coords, y_coords, z_coords, time_coords
+            )
         self.scene.compute_wind_vector_scale()
         self.scene.reset_all_objects()
 
@@ -774,12 +945,33 @@ class MainWindow(QMainWindow):
         spacing = self._infer_horizontal_grid_spacing()
         center_x = (min_x + max_x) / 2.0
         center_y = (min_y + max_y) / 2.0
-        half_extent = max((max_x - min_x) / 2.0, (max_y - min_y) / 2.0, spacing)
+        full_extent = max(max_x - min_x, max_y - min_y, spacing)
+
+        # Keep the displayed ground grid coarse enough to stay cheap to draw:
+        # _draw_grid emits ~2*(grid_size+1) immediate-mode lines per viewport per
+        # frame, so a 1200 m domain at 1 m would be ~2400 lines. Cap the number of
+        # divisions and round to a "nice" step (decoupled from wind sampling).
+        max_divisions = 120
+        spacing = self._nice_grid_step(max(spacing, full_extent / max_divisions))
+        half_extent = full_extent / 2.0
         half_steps = max(1, int(math.ceil(half_extent / spacing)))
 
         self.scene.grid_center = (center_x, center_y)
         self.scene.grid_spacing = spacing
         self.scene.grid_size = half_steps * 2
+
+    @staticmethod
+    def _nice_grid_step(raw: float) -> float:
+        """Round a spacing up to a tidy 1/2/2.5/5/10 x 10^n value (>= 1 m)."""
+        if raw <= 1.0:
+            return 1.0
+        exp = math.floor(math.log10(raw))
+        base = 10.0 ** exp
+        for mult in (1.0, 2.0, 2.5, 5.0, 10.0):
+            step = mult * base
+            if step >= raw:
+                return float(step)
+        return float(10.0 * base)
 
     def _infer_horizontal_grid_spacing(self) -> float:
         """Infer a display grid spacing from loaded wind X/Y coordinates."""

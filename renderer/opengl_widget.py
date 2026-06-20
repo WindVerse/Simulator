@@ -271,9 +271,11 @@ class OpenGLWidget(QOpenGLWidget):
         glLineWidth(1.0)
         glColor4f(0.5, 0.5, 0.5, 0.8)
 
-        # Draw axis labels every 10 meters
+        # Tick every ~10 m, but never with a zero/!=1 step when the grid spacing
+        # is itself >= 10 m (large domains) - that would raise in range().
         label_interval = 10
-        for i in range(-half_size, half_size + 1, label_interval // int(spacing)):
+        tick_step = max(1, int(round(label_interval / max(spacing, 1e-6))))
+        for i in range(-half_size, half_size + 1, tick_step):
             x = center_x + i * spacing
             y = center_y + i * spacing
 

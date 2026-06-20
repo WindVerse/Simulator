@@ -9,6 +9,7 @@ import sys
 import os
 import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import app_paths
 from models import config as cfg
 
 
@@ -341,6 +342,12 @@ class Scene:
         self.wind_vector_scale = 0.3           # auto-recomputed after data load
         self.wind_color_by_speed = True        # apply Beaufort colormap in resultant mode
 
+        # Two-tier display for large (streaming) cases: a thinned global field
+        # plus a full-resolution patch around each placed object.
+        self.wind_coarse_spacing_m = 5.0       # global field spacing (matches cache)
+        self.wind_fine_box_m = 12.0            # half-extent of the per-object patch
+        self.wind_fine_patch_enabled = True
+
         # Shared wind-vector geometry cache. Built once per state change and
         # reused by every viewport (see get_wind_geometry).
         self._wind_geom_cache = None
@@ -387,25 +394,84 @@ class Scene:
         mode = getattr(self, "wind_display_mode", "resultant")
         color_by_speed = bool(getattr(self, "wind_color_by_speed", True))
 
+        # A full-resolution patch around each object is only added for large
+        # (streaming) cases in resultant mode; the global field is coarse there.
+        streaming = bool(getattr(wf, "is_streaming", False))
+        fine_box = float(getattr(self, "wind_fine_box_m", 12.0))
+        fine_enabled = (
+            streaming and mode == "resultant"
+            and bool(getattr(self, "wind_fine_patch_enabled", True))
+        )
+        centers = self._fine_patch_centers() if fine_enabled else []
+        obj_key = tuple(
+            (round(float(c[0]), 1), round(float(c[1]), 1), round(float(c[2]), 1))
+            for c in centers
+        )
+
         cache_key = (
             id(points), wf.current_time, stride, scale, mode, id(wf.data),
-            color_by_speed,
+            color_by_speed, streaming, fine_enabled, fine_box, obj_key,
         )
         if cache_key != self._wind_geom_cache_key:
-            self._wind_geom_cache = build_wind_geometry(
+            geom = build_wind_geometry(
                 points, velocities, stride, scale, mode, color_by_speed
             )
+            if fine_enabled and centers:
+                geom = self._append_fine_patches(geom, centers, fine_box, scale,
+                                                 color_by_speed)
+            self._wind_geom_cache = geom
             self._wind_geom_cache_key = cache_key
 
         return self._wind_geom_cache
 
+    def _fine_patch_centers(self) -> List[np.ndarray]:
+        """World-space centers used to anchor full-resolution wind patches."""
+        centers: List[np.ndarray] = []
+        for obj in self.objects:
+            try:
+                if obj.name.lower() == "flag":
+                    centers.append(np.asarray(obj.get_pole_center(), dtype=np.float32))
+                else:
+                    centers.append(np.asarray(obj.get_center(), dtype=np.float32))
+            except Exception:
+                continue
+        return centers
+
+    def _append_fine_patches(self, geom, centers, fine_box, scale, color_by_speed):
+        """Concatenate full-res per-object arrow patches onto the global geometry."""
+        wf = self.wind_field
+        verts, colors = geom if isinstance(geom, tuple) else (geom, None)
+        v_parts = [verts] if verts is not None and verts.size else []
+        c_parts = [colors] if colors is not None and getattr(colors, "size", 0) else []
+
+        for center in centers:
+            box_points, box_vels = wf.get_box_grid(center, fine_box)
+            if len(box_points) == 0:
+                continue
+            vb, cb = build_wind_geometry(
+                box_points, box_vels, 1, scale, "resultant", color_by_speed
+            )
+            if vb is None or vb.size == 0:
+                continue
+            v_parts.append(vb)
+            if color_by_speed and cb is not None and cb.size:
+                c_parts.append(cb)
+
+        if not v_parts:
+            return (verts, colors)
+
+        merged_v = np.concatenate(v_parts, axis=0) if len(v_parts) > 1 else v_parts[0]
+        merged_c = None
+        if color_by_speed and c_parts:
+            total_c = sum(len(c) for c in c_parts)
+            if total_c == len(merged_v):
+                merged_c = (np.concatenate(c_parts, axis=0)
+                            if len(c_parts) > 1 else c_parts[0])
+        return (np.ascontiguousarray(merged_v, dtype=np.float32), merged_c)
+
     def _get_default_obj_path(self, object_type: str) -> Optional[str]:
         """Return the bundled OBJ path for a known object type, if present."""
-        candidate = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "objects",
-            f"{object_type.lower()}.obj"
-        )
+        candidate = app_paths.resource_path("objects", f"{object_type.lower()}.obj")
         return candidate if os.path.exists(candidate) else None
 
     def _edge_index_from_faces(self, faces: np.ndarray, num_vertices: int) -> torch.Tensor:
@@ -691,8 +757,20 @@ class Scene:
         Falls back to a default when data is empty or constant.
         """
         wf = self.wind_field
+
+        if getattr(wf, "is_streaming", False):
+            # No dense array in RAM; scale to the coarse display cell using the
+            # precomputed peak speed from the cache.
+            max_mag = float(wf._source.max_speed())
+            cell = float(getattr(self, "wind_coarse_spacing_m", 5.0))
+            if not np.isfinite(max_mag) or max_mag < 1e-6:
+                self.wind_vector_scale = 0.3
+            else:
+                self.wind_vector_scale = 0.8 * cell / max_mag
+            return self.wind_vector_scale
+
         data = wf.data
-        if data.size == 0:
+        if data is None or data.size == 0:
             self.wind_vector_scale = 0.3
             return self.wind_vector_scale
 

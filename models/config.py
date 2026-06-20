@@ -2,6 +2,8 @@
 import os
 import torch
 
+import app_paths
+
 # Test or Not
 IS_TEST = False
 VALIDATE = False
@@ -141,10 +143,12 @@ DATASET_DIR = os.path.join(BASE_DATASET_PATH, str(DATASET_VERSION))
 FLAG_DIR = os.path.join(DATASET_DIR, "flags")
 WIND_DIR = os.path.join(DATASET_DIR, "winds")
 TARGET_DIR = os.path.join(DATASET_DIR, "targets", TARGET_TYPE)
-TOPOLOGY_PATH = os.path.join(os.path.dirname(__file__), "topology_edge_index.npy")
+# Bundled read-only assets resolved via app_paths so they work both from source
+# and inside a one-file PyInstaller build (sys._MEIPASS).
+TOPOLOGY_PATH = app_paths.resource_path("models", "topology_edge_index.npy")
 FACES_PATH = os.path.join(DATASET_DIR, "topology", "topology_faces.npy")
-STD_ACC= os.path.join(os.path.dirname(__file__), "std_acc.npy")
-MEAN_ACC= os.path.join(os.path.dirname(__file__), "mean_acc.npy")
+STD_ACC = app_paths.resource_path("models", "std_acc.npy")
+MEAN_ACC = app_paths.resource_path("models", "mean_acc.npy")
 
 #########################
 ## Pinning Mask Values ##
