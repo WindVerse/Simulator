@@ -12,13 +12,23 @@ from PyQt5.QtGui import (
 )
 
 
-def make_flag_pixmap(size: int, color: QColor) -> QPixmap:
-    """
-    Render a small waving-flag icon (pole + rippling cloth) at ``size`` px.
+# Icon colors. The flag renders red in the simulation (object_mesh default
+# [0.8, 0.2, 0.2]); mirror that here so the library icon matches the scene.
+FLAG_CLOTH_COLOR = "#CC3333"   # == [0.8, 0.2, 0.2]
+FLAG_POLE_COLOR = "#4A4F57"    # neutral pole, like a real flagpole
+# A light tile so the red flag reads clearly against the dark theme.
+FLAG_TILE_COLOR = "#ECEFF3"
 
-    Drawn as a flat silhouette in ``color`` so it reads as a flag without any
-    text label.
+
+def make_flag_pixmap(size: int, color: QColor, pole_color: QColor = None) -> QPixmap:
     """
+    Render a small waving-flag icon (rippling cloth + pole) at ``size`` px.
+
+    The cloth is filled with ``color`` and the pole/finial with ``pole_color``
+    (defaults to ``color``), so it reads as a flag without any text label.
+    """
+    if pole_color is None:
+        pole_color = color
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
 
@@ -56,11 +66,12 @@ def make_flag_pixmap(size: int, color: QColor) -> QPixmap:
     painter.drawPath(path)
 
     # Flag pole + finial knob.
-    pole_pen = QPen(color, pole_w)
+    pole_pen = QPen(pole_color, pole_w)
     pole_pen.setCapStyle(Qt.RoundCap)
     painter.setPen(pole_pen)
     painter.drawLine(QPointF(pole_x, pole_top), QPointF(pole_x, pole_bottom))
     painter.setPen(Qt.NoPen)
+    painter.setBrush(pole_color)
     finial_r = size * 0.05
     painter.drawEllipse(QPointF(pole_x, pole_top), finial_r, finial_r)
 
@@ -95,16 +106,16 @@ class ObjectButton(QPushButton):
         self.setMaximumSize(100, 100)
         self.setCursor(Qt.OpenHandCursor)
 
-        # Color based on type
-        colors = {
-            'flag': '#F44336',
-        }
-        color = colors.get(self.object_type.lower(), '#607D8B')
+        # Light tile background; the flag itself carries the (red) color.
+        color = FLAG_TILE_COLOR
         self._color = QColor(color)
 
-        # Show the object as an actual flag silhouette instead of a text label.
+        # Show the object as an actual flag — red cloth (matching the
+        # simulation) on a neutral pole — instead of a text label.
         self.setText("")
-        self.setIcon(QIcon(make_flag_pixmap(56, QColor('white'))))
+        self.setIcon(QIcon(make_flag_pixmap(
+            56, QColor(FLAG_CLOTH_COLOR), QColor(FLAG_POLE_COLOR)
+        )))
         self.setIconSize(QSize(56, 56))
         self.setToolTip("Drag onto the grid to place")
 
@@ -158,7 +169,9 @@ class ObjectButton(QPushButton):
             painter.setBrush(self._color)
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(0, 0, size, size, 12, 12)
-            painter.drawPixmap(0, 0, make_flag_pixmap(size, QColor('white')))
+            painter.drawPixmap(0, 0, make_flag_pixmap(
+                size, QColor(FLAG_CLOTH_COLOR), QColor(FLAG_POLE_COLOR)
+            ))
             painter.end()
 
             drag.setPixmap(pixmap)
