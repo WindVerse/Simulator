@@ -437,6 +437,24 @@ class ObjectMesh:
             "pole_center": tuple(float(v) for v in pole_center)
         }
     
+    def get_triangle_indices(self) -> np.ndarray:
+        """Return a flattened, contiguous uint32 triangle index array for GL drawing.
+
+        Topology is fixed for a mesh's lifetime, so the array is built once and
+        cached (shared across all viewports). It is rebuilt only if ``faces`` is
+        replaced (detected via object identity).
+        """
+        faces = self.faces
+        if faces is None or faces.size == 0:
+            return np.empty(0, dtype=np.uint32)
+
+        cache = getattr(self, "_gl_indices", None)
+        if cache is None or getattr(self, "_gl_indices_src", None) != id(faces):
+            cache = np.ascontiguousarray(faces.reshape(-1), dtype=np.uint32)
+            self._gl_indices = cache
+            self._gl_indices_src = id(faces)
+        return cache
+
     def get_vertex_count(self) -> int:
         """Return the number of vertices."""
         return len(self.vertices)

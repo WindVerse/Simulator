@@ -18,7 +18,6 @@ from OpenGL.GLU import *
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from renderer.scene import Scene
-from renderer.wind_colormap import magnitudes_to_colors
 from objects.object_mesh import ObjectMesh
 
 
@@ -86,11 +85,9 @@ class OpenGLWidget(QOpenGLWidget):
         self._wind_vector_color = (0.2, 0.6, 1.0, 0.7)
         self._selection_color = (1.0, 0.8, 0.0, 1.0)
 
-        # Cached wind-vector geometry. Rebuilt only when inputs change so
-        # zoom/pan paints reuse the same vertex buffer.
-        self._wind_geom_cache_key = None
-        self._wind_geom_cache = None  # ndarray (resultant) or list[ndarray] (components)
-        
+        # Wind-vector geometry is built and cached on the shared Scene
+        # (Scene.get_wind_geometry) so every viewport reuses one build.
+
         # Enable mouse tracking for hover effects
         self.setMouseTracking(True)
         
@@ -301,45 +298,24 @@ class OpenGLWidget(QOpenGLWidget):
     )
 
     def _draw_wind_vectors(self):
-        """Draw wind velocity vectors.
+        """Draw wind velocity vectors from the scene's shared geometry cache.
 
         Honors scene.wind_display_mode (resultant / components),
-        scene.wind_downsample_stride (1 = every point), and
-        scene.wind_vector_scale (auto-tuned to the loaded data).
-
-        Geometry (and per-vertex colors, when colormap is on) is built once
-        per (time, stride, scale, mode, color-flag, data) tuple and reused
-        across paints — zoom/pan does not rebuild.
+        scene.wind_downsample_stride, and scene.wind_vector_scale. The geometry
+        is built once per state change by Scene.get_wind_geometry() and reused by
+        every viewport — pan/zoom (and sibling viewports) do not rebuild it.
         """
-        wf = self.scene.wind_field
-        points = wf.get_grid_points()
-        velocities = wf.get_current_velocities()
-
-        n = len(points)
-        if n == 0 or len(velocities) != n:
-            return
-
-        stride = max(1, int(getattr(self.scene, "wind_downsample_stride", 1)))
-        scale = float(getattr(self.scene, "wind_vector_scale", 0.3))
         mode = getattr(self.scene, "wind_display_mode", "resultant")
-        color_by_speed = bool(getattr(self.scene, "wind_color_by_speed", True))
-
-        cache_key = (
-            id(points), wf.current_time, stride, scale, mode, id(wf.data),
-            color_by_speed,
-        )
-        if cache_key != self._wind_geom_cache_key:
-            self._wind_geom_cache = self._build_wind_geometry(
-                points, velocities, stride, scale, mode, color_by_speed
-            )
-            self._wind_geom_cache_key = cache_key
+        geom = self.scene.get_wind_geometry()
+        if geom is None:
+            return
 
         glDisable(GL_LIGHTING)
         glLineWidth(2.0)
         glEnableClientState(GL_VERTEX_ARRAY)
         try:
             if mode == "components":
-                bands = self._wind_geom_cache or [None, None, None]
+                bands = geom or [None, None, None]
                 for axis, color in enumerate(self._COMPONENT_COLORS):
                     verts = bands[axis]
                     if verts is None or verts.size == 0:
@@ -348,7 +324,7 @@ class OpenGLWidget(QOpenGLWidget):
                     glVertexPointer(3, GL_FLOAT, 0, verts)
                     glDrawArrays(GL_LINES, 0, len(verts))
             else:
-                verts, colors = self._wind_geom_cache or (None, None)
+                verts, colors = geom or (None, None)
                 if verts is not None and verts.size > 0:
                     glVertexPointer(3, GL_FLOAT, 0, verts)
                     if colors is not None:
@@ -363,96 +339,6 @@ class OpenGLWidget(QOpenGLWidget):
             glDisableClientState(GL_VERTEX_ARRAY)
             glEnable(GL_LIGHTING)
 
-    def _build_wind_geometry(self, points, velocities, stride, scale, mode, color_by_speed):
-        """Build line-segment vertex array(s) for the current wind state.
-
-        Returns:
-            Resultant mode: (vertex_array (M*6,3) float32, color_array (M*6,4) float32 or None).
-            Components mode: list of three (M_axis*6, 3) float32 vertex arrays.
-        """
-        origins = points[::stride]
-        vels = velocities[::stride]
-
-        if mode == "components":
-            return [
-                self._segments_for_displacements(
-                    origins, self._axis_displacement(vels, axis, scale)
-                )[0]
-                for axis in range(3)
-            ]
-
-        verts, lengths_kept = self._segments_for_displacements(
-            origins, vels * scale
-        )
-        if not color_by_speed or lengths_kept is None or lengths_kept.size == 0:
-            return (verts, None)
-
-        # Visual length = scale * physical speed (m/s). Recover physical speed.
-        speeds = lengths_kept / max(scale, 1e-12)
-        arrow_colors = magnitudes_to_colors(speeds)             # (M_kept, 4)
-        vertex_colors = np.repeat(arrow_colors, 6, axis=0)      # (M_kept*6, 4)
-        vertex_colors = np.ascontiguousarray(vertex_colors, dtype=np.float32)
-        return (verts, vertex_colors)
-
-    @staticmethod
-    def _axis_displacement(vels, axis, scale):
-        """Build (M,3) displacements that are zero except on `axis`."""
-        out = np.zeros_like(vels)
-        out[:, axis] = vels[:, axis] * scale
-        return out
-
-    @staticmethod
-    def _segments_for_displacements(origins, displacements):
-        """Vectorized arrow geometry → flat GL_LINES vertex array.
-
-        Filters near-zero displacements (they wouldn't draw and would cause
-        NaN units), then emits six vertices per arrow:
-            [origin, tip, tip, left, tip, right]
-        for the shaft line plus the two arrowhead wings.
-
-        Returns:
-            (segments (M*6, 3) float32, kept_lengths (M,) float32 or None).
-        """
-        sq_len = np.einsum('ij,ij->i', displacements, displacements)
-        mask = sq_len > 1e-12
-        if not np.any(mask):
-            return np.empty((0, 3), dtype=np.float32), None
-
-        origins = origins[mask]
-        disp = displacements[mask]
-        lengths = np.sqrt(sq_len[mask])
-        tips = origins + disp
-        units = disp / lengths[:, None]
-
-        # Pick a reference axis least aligned with each unit to avoid
-        # degenerate cross products when units ≈ ±X.
-        x_dominant = np.abs(units[:, 0]) > 0.9
-        ref = np.where(
-            x_dominant[:, None],
-            np.array([[0.0, 1.0, 0.0]], dtype=np.float32),
-            np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
-        )
-        side = np.cross(units, ref)
-        side_norm = np.linalg.norm(side, axis=1)
-        # Any zero side-norm here is impossible given the ref choice, but
-        # guard anyway by leaving those rows' wings collapsed to the tip.
-        safe = side_norm > 1e-6
-        side[safe] = side[safe] / side_norm[safe, None]
-        side[~safe] = 0.0
-
-        head_len = np.clip(0.2 * lengths, 0.05, 0.3)[:, None]
-        base = tips - units * head_len
-        wing = side * (head_len * 0.5)
-        left = base + wing
-        right = base - wing
-
-        # Stack as (M, 6, 3) then flatten: each row contributes shaft+wings.
-        segments = np.stack([origins, tips, tips, left, tips, right], axis=1)
-        return (
-            np.ascontiguousarray(segments.reshape(-1, 3), dtype=np.float32),
-            lengths.astype(np.float32, copy=False),
-        )
-    
     def _draw_objects(self):
         """Draw all objects in the scene."""
         for obj in self.scene.objects:
@@ -472,12 +358,12 @@ class OpenGLWidget(QOpenGLWidget):
             selected: Whether the mesh is selected
         """
         glPushMatrix()
-        
+
         # Apply object transform.
         # flag.obj is authored Z-up (pole along X, height along Z) — no rotation needed.
         glTranslatef(*mesh.position)
         glScalef(mesh.scale, mesh.scale, mesh.scale)
-        
+
         # Set color with glow effect for selected objects
         if selected:
             # Brighten color for selection glow
@@ -490,40 +376,52 @@ class OpenGLWidget(QOpenGLWidget):
             glColor4f(*color)
         else:
             glColor4f(*mesh.color)
-        
-        # Draw mesh triangles
-        glBegin(GL_TRIANGLES)
-        
-        for face in mesh.faces:
-            for vertex_idx in face:
-                if vertex_idx < len(mesh.normals):
-                    glNormal3fv(mesh.normals[vertex_idx])
-                glVertex3fv(mesh.current_vertices[vertex_idx])
-        
-        glEnd()
-        
-        # Draw selection effects
-        if selected:
-            glDisable(GL_LIGHTING)
-            glLineWidth(3.0)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            glColor4f(1.0, 1.0, 0.0, 1.0)
-            
-            # Draw outline with thicker lines
-            glBegin(GL_TRIANGLES)
-            for face in mesh.faces:
-                for vertex_idx in face:
-                    glVertex3fv(mesh.current_vertices[vertex_idx])
-            glEnd()
-            
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            
-            # Draw bounding box
-            self._draw_bounding_box(mesh)
-            
-            glEnable(GL_LIGHTING)
-        
-        glPopMatrix()
+
+        # Draw mesh triangles via client vertex arrays (no per-vertex Python
+        # loop, no per-context GL objects — safe across all viewports).
+        verts = np.ascontiguousarray(mesh.current_vertices, dtype=np.float32)
+        indices = mesh.get_triangle_indices()
+        if verts.size == 0 or indices.size == 0:
+            glPopMatrix()
+            return
+
+        has_normals = mesh.normals.shape == verts.shape
+        normals = (
+            np.ascontiguousarray(mesh.normals, dtype=np.float32)
+            if has_normals else None
+        )
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        try:
+            glVertexPointer(3, GL_FLOAT, 0, verts)
+            if has_normals:
+                glEnableClientState(GL_NORMAL_ARRAY)
+                glNormalPointer(GL_FLOAT, 0, normals)
+
+            glDrawElements(GL_TRIANGLES, indices.size, GL_UNSIGNED_INT, indices)
+
+            if has_normals:
+                glDisableClientState(GL_NORMAL_ARRAY)
+
+            # Draw selection effects
+            if selected:
+                glDisable(GL_LIGHTING)
+                glLineWidth(3.0)
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+                glColor4f(1.0, 1.0, 0.0, 1.0)
+
+                # Outline: same geometry, wireframe pass
+                glDrawElements(GL_TRIANGLES, indices.size, GL_UNSIGNED_INT, indices)
+
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+                # Draw bounding box
+                self._draw_bounding_box(mesh)
+
+                glEnable(GL_LIGHTING)
+        finally:
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glPopMatrix()
     
     def _draw_bounding_box(self, mesh: ObjectMesh):
         """Draw a bounding box around a mesh."""

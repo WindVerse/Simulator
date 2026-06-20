@@ -14,6 +14,7 @@ from models import config as cfg
 
 from objects.object_mesh import ObjectMesh
 from wind_data.wind_field import WindField
+from renderer.wind_geometry import build_wind_geometry
 
 
 _DEFAULT_TARGET = np.array([0.0, 0.0, 2.0], dtype=np.float32)
@@ -340,6 +341,11 @@ class Scene:
         self.wind_vector_scale = 0.3           # auto-recomputed after data load
         self.wind_color_by_speed = True        # apply Beaufort colormap in resultant mode
 
+        # Shared wind-vector geometry cache. Built once per state change and
+        # reused by every viewport (see get_wind_geometry).
+        self._wind_geom_cache = None
+        self._wind_geom_cache_key = None
+
         # Grid settings
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = 1.0
@@ -353,6 +359,45 @@ class Scene:
         # Object ID counter
         self._next_id = 0
         self._object_ids: Dict[int, ObjectMesh] = {}
+
+    def get_wind_geometry(self):
+        """Return the wind-vector geometry for the current state, built once and shared.
+
+        The result is cached against the wind/display state so every viewport
+        reuses the same arrays (rebuilt only when that state changes).
+
+        Returns:
+            Resultant mode: (vertex_array, color_array_or_None).
+            Components mode: list of three vertex arrays.
+            None when there is nothing to draw.
+        """
+        wf = self.wind_field
+        if wf is None:
+            return None
+
+        points = wf.get_grid_points()
+        velocities = wf.get_current_velocities()
+
+        n = len(points)
+        if n == 0 or len(velocities) != n:
+            return None
+
+        stride = max(1, int(getattr(self, "wind_downsample_stride", 1)))
+        scale = float(getattr(self, "wind_vector_scale", 0.3))
+        mode = getattr(self, "wind_display_mode", "resultant")
+        color_by_speed = bool(getattr(self, "wind_color_by_speed", True))
+
+        cache_key = (
+            id(points), wf.current_time, stride, scale, mode, id(wf.data),
+            color_by_speed,
+        )
+        if cache_key != self._wind_geom_cache_key:
+            self._wind_geom_cache = build_wind_geometry(
+                points, velocities, stride, scale, mode, color_by_speed
+            )
+            self._wind_geom_cache_key = cache_key
+
+        return self._wind_geom_cache
 
     def _get_default_obj_path(self, object_type: str) -> Optional[str]:
         """Return the bundled OBJ path for a known object type, if present."""
