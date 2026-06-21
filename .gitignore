@@ -25,3 +25,7 @@ Thumbs.db
 
 #sample wind data files
 #sample_wind_data/
+
+# Installer build output
+dist/
+installer/Output/
