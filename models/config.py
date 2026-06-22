@@ -54,6 +54,7 @@ else:
     ITERATION_COUNT = 100
 FPS = 10
 GRID_SPACING = 1.0                     # Ground reference grid: meters per square
+FLAG_POLE_HEIGHT = 1.5                 # Fixed flag pole mount height (m): center of the wind field's lowest 1 m sampling layer
 NO_DIGITS = 3
 if IS_TEST:
     MAX_FRAMES = 30

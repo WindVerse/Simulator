@@ -53,13 +53,15 @@ def test_snapping_logic():
     wind_field = WindField()
     scene = Scene(wind_field)
     
+    pole_z = scene.flag_pole_height
+
     test_cases = [
         # (input_pos, expected_snapped, description)
-        (np.array([1.5, 0.5, 2.3]), np.array([2.0, 0.0, 2.0]), "Round 1.5→2, 2.3→2"),
-        (np.array([1.4, 1.0, 2.4]), np.array([1.0, 0.0, 2.0]), "Round 1.4→1, 2.4→2"),
-        (np.array([0.0, 5.0, 0.0]), np.array([0.0, 0.0, 0.0]), "Grid point (0,0,0)"),
-        (np.array([-1.5, 2.0, -2.3]), np.array([-2.0, 0.0, -2.0]), "Round -1.5→-2, -2.3→-2"),
-        (np.array([25.7, 0.0, -30.6]), np.array([26.0, 0.0, -31.0]), "Large coords"),
+        (np.array([1.5, 0.5, 2.3]), np.array([1.5, 0.5, pole_z]), "Already a cell center (1.5, 0.5)"),
+        (np.array([1.4, 1.0, 2.4]), np.array([1.5, 1.5, pole_z]), "Snap 1.4→1.5, 1.0→1.5 (nearest cell center)"),
+        (np.array([0.0, 5.0, 0.0]), np.array([0.5, 5.5, pole_z]), "Snap to cell center (0.5, 5.5)"),
+        (np.array([-1.5, 2.0, -2.3]), np.array([-1.5, 2.5, pole_z]), "Snap -1.5→-1.5, 2.0→2.5"),
+        (np.array([25.7, 0.0, -30.6]), np.array([25.5, 0.5, pole_z]), "Large coords"),
     ]
     
     all_pass = True
