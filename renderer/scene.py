@@ -350,6 +350,7 @@ class Scene:
         self.grid_size = 100  # Covers -50 to +50 meters with 1.0m spacing
         self.grid_spacing = cfg.GRID_SPACING
         self.grid_center = (0.0, 0.0)
+        self.flag_pole_height = cfg.FLAG_POLE_HEIGHT
 
         # Shared ground-grid line geometry cache. Rebuilt only when the grid
         # extent/spacing/center changes; reused by every viewport so a fine 1 m
@@ -660,7 +661,10 @@ class Scene:
     
     def snap_to_grid(self, position: np.ndarray) -> np.ndarray:
         """
-        Snap a position to the nearest grid point on the X/Y ground plane.
+        Snap a position to the center of the nearest 1x1 grid cell on the
+        X/Y ground plane (e.g. x=0.5, 1.5, 2.5, ... not the grid line
+        intersections at 0, 1, 2, ...), and pin height to the flag pole's
+        fixed mount height.
 
         Args:
             position: World position
@@ -672,13 +676,13 @@ class Scene:
         snapped = position.copy()
         snapped[0] = (
             center_x +
-            np.round((position[0] - center_x) / self.grid_spacing) * self.grid_spacing
+            (np.floor((position[0] - center_x) / self.grid_spacing) + 0.5) * self.grid_spacing
         )
         snapped[1] = (
             center_y +
-            np.round((position[1] - center_y) / self.grid_spacing) * self.grid_spacing
+            (np.floor((position[1] - center_y) / self.grid_spacing) + 0.5) * self.grid_spacing
         )
-        snapped[2] = 0  # Keep z at ground level (Z-up world)
+        snapped[2] = self.flag_pole_height
         return snapped
 
     def get_grid_points(self) -> np.ndarray:
