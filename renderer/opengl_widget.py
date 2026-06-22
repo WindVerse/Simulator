@@ -571,9 +571,9 @@ class OpenGLWidget(QOpenGLWidget):
             else:
                 world_pos = self._screen_to_world_current(event.x(), event.y())
                 if world_pos is not None:
-                    # Move object with offset, keep on ground (Z-up world)
+                    # Move object with offset, keep at the fixed pole height
                     new_pos = world_pos + self._drag_offset
-                    new_pos[2] = 0
+                    new_pos[2] = self.scene.flag_pole_height
                     self.scene.move_object(self._dragged_object, new_pos)
                     self.update()
         elif self._mouse_button == Qt.RightButton:

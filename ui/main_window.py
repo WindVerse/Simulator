@@ -942,36 +942,20 @@ class MainWindow(QMainWindow):
         min_x, max_x = float(min_corner[0]), float(max_corner[0])
         min_y, max_y = float(min_corner[1]), float(max_corner[1])
 
+        # Always draw the ground grid at the wind field's true horizontal
+        # spacing (1 m on the real dataset) so grid squares match the actual
+        # wind sampling cells - flag poles snap to the center of these cells.
         spacing = self._infer_horizontal_grid_spacing()
         center_x = (min_x + max_x) / 2.0
         center_y = (min_y + max_y) / 2.0
         full_extent = max(max_x - min_x, max_y - min_y, spacing)
 
-        # Keep the displayed ground grid coarse enough to stay cheap to draw:
-        # _draw_grid emits ~2*(grid_size+1) immediate-mode lines per viewport per
-        # frame, so a 1200 m domain at 1 m would be ~2400 lines. Cap the number of
-        # divisions and round to a "nice" step (decoupled from wind sampling).
-        max_divisions = 120
-        spacing = self._nice_grid_step(max(spacing, full_extent / max_divisions))
         half_extent = full_extent / 2.0
         half_steps = max(1, int(math.ceil(half_extent / spacing)))
 
         self.scene.grid_center = (center_x, center_y)
         self.scene.grid_spacing = spacing
         self.scene.grid_size = half_steps * 2
-
-    @staticmethod
-    def _nice_grid_step(raw: float) -> float:
-        """Round a spacing up to a tidy 1/2/2.5/5/10 x 10^n value (>= 1 m)."""
-        if raw <= 1.0:
-            return 1.0
-        exp = math.floor(math.log10(raw))
-        base = 10.0 ** exp
-        for mult in (1.0, 2.0, 2.5, 5.0, 10.0):
-            step = mult * base
-            if step >= raw:
-                return float(step)
-        return float(10.0 * base)
 
     def _infer_horizontal_grid_spacing(self) -> float:
         """Infer a display grid spacing from loaded wind X/Y coordinates."""

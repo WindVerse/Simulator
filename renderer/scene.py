@@ -362,6 +362,11 @@ class Scene:
         self.grid_spacing = 1.0
         self.grid_center = (0.0, 0.0)
 
+        # Fixed mount height (m) for a flag pole's center. Matches the center
+        # of the wind field's lowest 1m sampling layer (z=1..2m) so the pole
+        # lands exactly where get_velocity_at_8_octants expects to sample.
+        self.flag_pole_height = 1.5
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Selection
@@ -709,7 +714,10 @@ class Scene:
     
     def snap_to_grid(self, position: np.ndarray) -> np.ndarray:
         """
-        Snap a position to the nearest grid point on the X/Y ground plane.
+        Snap a position to the center of the nearest 1x1 grid cell on the
+        X/Y ground plane (e.g. x=0.5, 1.5, 2.5, ... not the grid line
+        intersections at 0, 1, 2, ...), and pin height to the flag pole's
+        fixed mount height.
 
         Args:
             position: World position
@@ -721,13 +729,13 @@ class Scene:
         snapped = position.copy()
         snapped[0] = (
             center_x +
-            np.round((position[0] - center_x) / self.grid_spacing) * self.grid_spacing
+            (np.floor((position[0] - center_x) / self.grid_spacing) + 0.5) * self.grid_spacing
         )
         snapped[1] = (
             center_y +
-            np.round((position[1] - center_y) / self.grid_spacing) * self.grid_spacing
+            (np.floor((position[1] - center_y) / self.grid_spacing) + 0.5) * self.grid_spacing
         )
-        snapped[2] = 0  # Keep z at ground level (Z-up world)
+        snapped[2] = self.flag_pole_height
         return snapped
 
     def get_grid_points(self) -> np.ndarray:
